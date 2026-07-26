@@ -1,3 +1,35 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-console.log("NutriHelp MCP server starting...");
+const express_1 = __importDefault(require("express"));
+const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
+const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
+const server = new mcp_js_1.McpServer({
+    name: "nutrihelp-mcp-server",
+    version: "0.1.0",
+});
+server.registerTool("ping", {
+    title: "Ping",
+    description: "Simple test tool to confirm the MCP server is working",
+    inputSchema: {},
+}, async () => {
+    return {
+        content: [{ type: "text", text: "pong from NutriHelp MCP server" }],
+    };
+});
+const app = (0, express_1.default)();
+app.use(express_1.default.json());
+app.post("/mcp", async (req, res) => {
+    const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+    });
+    res.on("close", () => transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`NutriHelp MCP server listening on http://localhost:${PORT}/mcp`);
+});
