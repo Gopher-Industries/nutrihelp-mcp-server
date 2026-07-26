@@ -1,0 +1,31 @@
+{
+  "name": "nutrihelp-mcp-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+  "build": "tsc",
+  "start": "node dist/server.js",
+  "dev": "tsc && node dist/server.js"
+},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gopher-Industries/nutrihelp-mcp-server.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Gopher-Industries/nutrihelp-mcp-server/issues"
+  },
+  "homepage": "https://github.com/Gopher-Industries/nutrihelp-mcp-server#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+  
+}
