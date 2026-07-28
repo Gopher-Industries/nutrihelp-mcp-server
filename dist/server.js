@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
+const backend_1 = require("./services/backend");
 const server = new mcp_js_1.McpServer({
     name: "nutrihelp-mcp-server",
     version: "0.1.0",
@@ -16,8 +17,42 @@ server.registerTool("ping", {
     inputSchema: {},
 }, async () => {
     return {
-        content: [{ type: "text", text: "pong from NutriHelp MCP server" }],
+        content: [
+            {
+                type: "text",
+                text: "pong from NutriHelp MCP server",
+            },
+        ],
     };
+});
+server.registerTool("get_meal_plan", {
+    title: "Get Meal Plan",
+    description: "Retrieve the authenticated user's meal plan",
+    inputSchema: {},
+}, async () => {
+    try {
+        const mealPlan = await (0, backend_1.getMealPlan)();
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(mealPlan, null, 2),
+                },
+            ],
+        };
+    }
+    catch (error) {
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: error instanceof Error
+                        ? error.message
+                        : "Unknown error",
+                },
+            ],
+        };
+    }
 });
 const app = (0, express_1.default)();
 app.use(express_1.default.json());
