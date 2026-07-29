@@ -1,5 +1,6 @@
 export interface AuthenticatedUser {
-  userId: string;
-  email?: string;
+  userId: number;
+  email: string;
+  role: string;
   expiresAt?: number;
 }

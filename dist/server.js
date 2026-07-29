@@ -6,6 +6,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
+const validateSupabaseToken_js_1 = require("./auth/validateSupabaseToken.js");
+require("dotenv/config");
 const server = new mcp_js_1.McpServer({
     name: "nutrihelp-mcp-server",
     version: "0.1.0",
@@ -22,6 +24,19 @@ server.registerTool("ping", {
 const app = (0, express_1.default)();
 app.use(express_1.default.json());
 app.post("/mcp", async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+        res.status(401).json({ error: "Bearer token is required." });
+        return;
+    }
+    try {
+        const token = authHeader.slice(7).trim();
+        await (0, validateSupabaseToken_js_1.validateSupabaseToken)(token);
+    }
+    catch {
+        res.status(401).json({ error: "Invalid or expired token." });
+        return;
+    }
     const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
     });

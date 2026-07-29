@@ -1,8 +1,15 @@
+import { verify, type JwtPayload } from "jsonwebtoken";
 import type { AuthenticatedUser } from "./authTypes.js";
-import { createSupabaseAuthClient } from "./supabaseClient.js";
+
+interface NutriHelpTokenPayload extends JwtPayload {
+  userId?: number;
+  email?: string;
+  role?: string;
+  type?: string;
+}
 
 /**
- * Validates a Supabase access token and returns the verified user identity.
+ * Validates a NutriHelp JWT and returns the authenticated user.
  */
 export async function validateSupabaseToken(
   token: string,
@@ -10,26 +17,41 @@ export async function validateSupabaseToken(
   const cleanedToken = token.trim();
 
   if (!cleanedToken) {
-    throw new Error("Supabase access token is required.");
+    throw new Error("Access token is required.");
   }
 
-  const supabase = createSupabaseAuthClient();
-
-  const { data, error } = await supabase.auth.getClaims(cleanedToken);
-
-  if (error || !data?.claims) {
-    throw new Error("Invalid or expired Supabase access token.");
+  const jwtSecret = process.env.JWT_TOKEN?.trim();
+  if (!jwtSecret) {
+    throw new Error("JWT_TOKEN is not configured.");
   }
 
-  const claims = data.claims;
+  let decodedToken: string | NutriHelpTokenPayload;
 
-  if (typeof claims.sub !== "string" || !claims.sub) {
-    throw new Error("The verified token does not contain a valid user ID.");
+  try {
+    decodedToken = verify(cleanedToken, jwtSecret);
+  } catch {
+    throw new Error("Invalid or expired access token.");
   }
 
-  return {
-    userId: claims.sub,
-    email: typeof claims.email === "string" ? claims.email : undefined,
-    expiresAt: typeof claims.exp === "number" ? claims.exp : undefined,
+  if (
+    typeof decodedToken === "string" ||
+    decodedToken.type !== "access" ||
+    typeof decodedToken.userId !== "number" ||
+    typeof decodedToken.email !== "string" ||
+    typeof decodedToken.role !== "string"
+  ) {
+    throw new Error("The verified token does not contain valid user details.");
+  }
+
+  const authenticatedUser: AuthenticatedUser = {
+    userId: decodedToken.userId,
+    email: decodedToken.email,
+    role: decodedToken.role,
   };
+
+  if (typeof decodedToken.exp === "number") {
+    authenticatedUser.expiresAt = decodedToken.exp;
+  }
+
+  return authenticatedUser;
 }
