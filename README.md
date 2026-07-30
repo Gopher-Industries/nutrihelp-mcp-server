@@ -34,3 +34,21 @@ See: https://claude.com/docs/connectors/custom/remote-mcp
 ## Tools
 
 - `ping` — test tool, returns a static string, no auth/data access
+
+## Supabase JWT Authentication
+
+The `/mcp` endpoint requires authentication.
+
+### How it works
+
+1. The user signs in through the NutriHelp backend.
+2. The backend returns a Supabase JWT access token.
+3. The client sends the token to the MCP server.
+4. The MCP server validates the token before processing the request.
+
+### Request Header
+
+Include the access token in the `Authorization` header:
+
+```http
+Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
