@@ -29,12 +29,12 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-<<<<<<< HEAD
+
     "@types/node": "^26.1.2",
-=======
+
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.1.1",
->>>>>>> feature/initial-mcp-setup
+
     "typescript": "^7.0.2"
   }
 }

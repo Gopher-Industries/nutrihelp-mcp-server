@@ -1,5 +1,5 @@
 const API_BASE_URL =
-  process.env.NUTRIHELP_API_URL || "http://localhost:80";
+  process.env.NUTRIHELP_API_URL || "http://localhost:8081";
 
 /**
  * Fetch the authenticated user's meal plan

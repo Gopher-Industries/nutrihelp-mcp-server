@@ -1,14 +1,16 @@
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-<<<<<<< HEAD
+
 
 import { getMealPlan } from "./services/backend";
 
-=======
+
 import { validateSupabaseToken } from "./auth/validateSupabaseToken.js";
 import "dotenv/config";
->>>>>>> feature/initial-mcp-setup
+
+let currentUserToken: string | undefined;
+
 const server = new McpServer({
   name: "nutrihelp-mcp-server",
   version: "0.1.0",
@@ -42,7 +44,7 @@ server.registerTool(
   },
   async () => {
     try {
-      const mealPlan = await getMealPlan();
+      const mealPlan = await getMealPlan(currentUserToken);
 
       return {
         content: [
@@ -82,6 +84,7 @@ app.post("/mcp", async (req, res) => {
   try {
     const token = authHeader.slice(7).trim();
     await validateSupabaseToken(token);
+    currentUserToken = token;
   } catch {
     res.status(401).json({ error: "Invalid or expired token." });
     return;
