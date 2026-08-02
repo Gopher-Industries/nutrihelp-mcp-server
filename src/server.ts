@@ -1,8 +1,16 @@
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+
+import { getMealPlan } from "./services/backend";
+
+
 import { validateSupabaseToken } from "./auth/validateSupabaseToken.js";
 import "dotenv/config";
+
+let currentUserToken: string | undefined;
+
 const server = new McpServer({
   name: "nutrihelp-mcp-server",
   version: "0.1.0",
@@ -17,8 +25,48 @@ server.registerTool(
   },
   async () => {
     return {
-      content: [{ type: "text", text: "pong from NutriHelp MCP server" }],
+      content: [
+        {
+          type: "text",
+          text: "pong from NutriHelp MCP server",
+        },
+      ],
     };
+  }
+);
+
+server.registerTool(
+  "get_meal_plan",
+  {
+    title: "Get Meal Plan",
+    description: "Retrieve the authenticated user's meal plan",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const mealPlan = await getMealPlan(currentUserToken);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(mealPlan, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              error instanceof Error
+                ? error.message
+                : "Unknown error",
+          },
+        ],
+      };
+    }
   }
 );
 
@@ -36,6 +84,7 @@ app.post("/mcp", async (req, res) => {
   try {
     const token = authHeader.slice(7).trim();
     await validateSupabaseToken(token);
+    currentUserToken = token;
   } catch {
     res.status(401).json({ error: "Invalid or expired token." });
     return;
@@ -46,11 +95,13 @@ app.post("/mcp", async (req, res) => {
   });
 
   res.on("close", () => transport.close());
+
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log(`NutriHelp MCP server listening on http://localhost:${PORT}/mcp`);
 });

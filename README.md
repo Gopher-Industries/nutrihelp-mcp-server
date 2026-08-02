@@ -52,3 +52,36 @@ Include the access token in the `Authorization` header:
 
 ```http
 Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
+
+## Authentication
+
+The MCP server validates a NutriHelp-issued JWT (not a raw Supabase token) via the `Authorization: Bearer <token>` header. Tokens are signed with a shared secret (`JWT_TOKEN` in `.env`), which must match the value used by the NutriHelp backend (`nutrihelp-api`), otherwise validation will fail even for genuinely valid, freshly issued tokens.
+
+Required `.env` variables:
+
+## Tools
+
+### get_meal_plan
+Retrieves the authenticated user's meal plan from the NutriHelp backend. The validated user's token is threaded through from the MCP server's auth layer into the backend API call, so results are scoped to that specific user.
+
+## Testing locally (without Claude)
+
+You can test the full auth + tool pipeline directly via curl or PowerShell's `Invoke-RestMethod`, without needing a Claude connector.
+
+1. Register a test user against the NutriHelp backend:
+```powershell
+$body = @{ name="Test"; email="test@example.com"; password="Test@1234"; contact_number="0412345678"; address="123 Test St" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8081/api/auth/register" -Method POST -ContentType "application/json" -Body $body
+```
+2. Log in to get a token:
+```powershell
+$loginBody = @{ email="test@example.com"; password="Test@1234" } | ConvertTo-Json
+$response = Invoke-RestMethod -Uri "http://localhost:8081/api/auth/login" -Method POST -ContentType "application/json" -Body $loginBody
+$token = $response.data.session.access_token
+```
+
+3. Call the MCP server with the token (note: both `Authorization` and `Accept` headers are required):
+```powershell
+$mcpBody = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_meal_plan","arguments":{}}}'
+Invoke-RestMethod -Uri "http://localhost:3000/mcp" -Method POST -Headers @{"Authorization"="Bearer $token"; "Accept"="application/json, text/event-stream"} -ContentType "application/json" -Body $mcpBody
+```
