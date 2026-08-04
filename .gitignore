@@ -8,3 +8,6 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+.claude/
+docs/
+CLAUDE.md
