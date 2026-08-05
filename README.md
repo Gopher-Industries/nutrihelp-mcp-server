@@ -18,55 +18,26 @@ Server runs on http://localhost:3000/mcp using Streamable HTTP transport.
 4. In Claude.ai: Settings > Connectors > Add custom connector > paste URL
 5. Enable the connector in a chat and test the `ping` tool
 
-## Authentication — TODO
+## Authentication
 
-Currently the `/mcp` endpoint has NO authentication, anyone with the
-URL can call it. This is fine for local testing but must be fixed
-before anything beyond `ping` touches real backend/AI resources.
+The MCP server must not connect directly to Supabase or hold Supabase
+credentials. NutriHelp data is accessed only through the NutriHelp backend API.
 
-Two options going in the connector's "Advanced settings":
-- Request header auth (API key/bearer token), simplest, one shared
-  credential for now
-- OAuth, needed if we want per-user access control later
-
-See: https://claude.com/docs/connectors/custom/remote-mcp
+The current integration forwards the request's bearer token to the NutriHelp
+backend, which remains responsible for protecting its API. MCP-specific token
+verification is tracked separately and is not implemented by a Supabase client
+in this server.
 
 ## Tools
 
 - `ping` — test tool, returns a static string, no auth/data access
-
-## Supabase JWT Authentication
-
-The `/mcp` endpoint requires authentication.
-
-### How it works
-
-1. The user signs in through the NutriHelp backend.
-2. The backend returns a Supabase JWT access token.
-3. The client sends the token to the MCP server.
-4. The MCP server validates the token before processing the request.
-
-### Request Header
-
-Include the access token in the `Authorization` header:
-
-```http
-Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
-
-## Authentication
-
-The MCP server validates a NutriHelp-issued JWT (not a raw Supabase token) via the `Authorization: Bearer <token>` header. Tokens are signed with a shared secret (`JWT_TOKEN` in `.env`), which must match the value used by the NutriHelp backend (`nutrihelp-api`), otherwise validation will fail even for genuinely valid, freshly issued tokens.
-
-Required `.env` variables:
-
-## Tools
-
-### get_meal_plan
-Retrieves the authenticated user's meal plan from the NutriHelp backend. The validated user's token is threaded through from the MCP server's auth layer into the backend API call, so results are scoped to that specific user.
+- `get_meal_plan` — forwards the current request's bearer token to the
+  NutriHelp backend and returns that backend's response
 
 ## Testing locally (without Claude)
 
-You can test the full auth + tool pipeline directly via curl or PowerShell's `Invoke-RestMethod`, without needing a Claude connector.
+You can test the backend integration directly via PowerShell's
+`Invoke-RestMethod`, without needing a Claude connector.
 
 1. Register a test user against the NutriHelp backend:
 ```powershell
