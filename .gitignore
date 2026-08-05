@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 .env
 .env.local
 *.log
@@ -11,3 +12,4 @@ Thumbs.db
 .claude/
 docs/
 CLAUDE.md
+TMP_*

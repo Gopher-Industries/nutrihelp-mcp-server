@@ -4,8 +4,6 @@
     "lib": ["ES2023"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "rootDir": "./src",
-    "outDir": "./dist",
     "types": ["node"],
 
     "strict": true,
@@ -23,5 +21,8 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  // Wide on purpose: this config drives `typecheck` and typed linting, so it must cover
+  // everything a rule can fire on. Emit is narrowed to src/ by tsconfig.build.json, which
+  // already excludes test/ and scripts/.
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "*.config.ts"]
 }

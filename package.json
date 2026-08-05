@@ -11,7 +11,18 @@
     "dev": "node --watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run test/unit",
+    "conformance": "vitest run test/conformance",
+    "test:security": "vitest run test/security",
+    "test:integration": "vitest run test/integration",
+    "coverage": "vitest run --coverage",
+    "security:audit": "npm audit --audit-level=high",
+    "validate": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run conformance && npm run security:audit",
+    "prepare": "husky"
   },
   "repository": {
     "type": "git",
@@ -28,12 +39,21 @@
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "dotenv": "^16.4.7",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "jose": "^6.2.8"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/client": "2.0.0",
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.3",
-    "typescript": "6.0.3"
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.0",
+    "husky": "^9.1.7",
+    "prettier": "3.2.5",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.66.0",
+    "undici": "^8.10.0",
+    "vitest": "^4.1.10"
   }
 }
