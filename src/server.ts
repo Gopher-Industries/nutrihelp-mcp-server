@@ -1,13 +1,8 @@
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-
-
-import { getMealPlan } from "./services/backend";
-
-
-import { validateSupabaseToken } from "./auth/validateSupabaseToken.js";
 import "dotenv/config";
+import { getMealPlan } from "./services/backend.js";
 
 let currentUserToken: string | undefined;
 
@@ -81,14 +76,15 @@ app.post("/mcp", async (req, res) => {
     return;
   }
 
-  try {
-    const token = authHeader.slice(7).trim();
-    await validateSupabaseToken(token);
-    currentUserToken = token;
-  } catch {
-    res.status(401).json({ error: "Invalid or expired token." });
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    res.status(401).json({ error: "Bearer token is required." });
     return;
   }
+
+  // The NutriHelp backend remains responsible for validating this token.
+  // MCP-specific token verification will be implemented separately.
+  currentUserToken = token;
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
