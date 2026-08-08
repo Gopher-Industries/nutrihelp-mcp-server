@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  // Emit settings live here, not in tsconfig.json: that config is widened to cover test/ and
+  // scripts/ for typed linting, and a rootDir of ./src would reject them.
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["test/**", "scripts/**", "**/*.test.ts"]
+}

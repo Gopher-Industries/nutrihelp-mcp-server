@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+
+# Working-tree only, not versioned with the repository.
+docs/
+.claude/
