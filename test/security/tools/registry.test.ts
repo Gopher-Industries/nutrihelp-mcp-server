@@ -1,9 +1,12 @@
 /**
  * Security suite: cross-user access through the dispatcher. Ticket 33 case 6.
  *
- * WILL PASS WHEN: tickets 21, 22, 24 and 25 land the validator, revocation, the upstream client
- * and the registry, and ticket 30 lands `get_meal_plan`. It also needs the backend's
- * `GET /api/mealplan/me`, which is WS2's work in another repository.
+ * WILL PASS WHEN: ticket 27 lands the token validator, 28 the upstream client, 25 the registry
+ * and 32 `get_meal_plan`. It also needs the backend's `GET /api/mealplan/me`, which is WS2's
+ * work in another repository.
+ *
+ * NO TICKET COVERS `src/auth/revocation.ts`, which this case also depends on — ticket 42 is the
+ * backend's disconnection endpoint, not the MCP-side live introspection.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -72,8 +75,9 @@ beforeEach(async () => {
   });
 
   // The own-user route. Identity comes from the exchanged credential; the path carries none.
+  // Query-tolerant by necessity, not style — see RouteSpec.path in upstreamMock.ts.
   upstream.route({
-    path: MEALPLAN_ME_PATH,
+    path: new RegExp(`^${MEALPLAN_ME_PATH}(\\?.*)?$`),
     status: 200,
     body: {
       data: [
@@ -141,14 +145,14 @@ describe('one user reaching for another user data', () => {
     // 1. The own-user route, and only it.
     const ownUserCalls = expectWireCalls(
       upstream.callsTo(MEALPLAN_ME_PATH),
-      'case 6: get_meal_plan must call GET /api/mealplan/me. Plan §7.3'
+      'case 6: get_meal_plan must call GET /api/mealplan/me'
     );
     const legacyCalls = upstream
       .callsTo(MEALPLAN_LEGACY_PATH)
       .filter((call) => !call.path.startsWith(MEALPLAN_ME_PATH));
     expect(
       legacyCalls,
-      'case 6: the identity-fallback route resolves identity from the request. Plan §8.4 forbids calling it'
+      'case 6: the identity-fallback route resolves identity from the request and must never be called'
     ).toHaveLength(0);
 
     // 2. Scanned over every resource-origin call and the whole wire, not just the own-user
@@ -157,7 +161,7 @@ describe('one user reaching for another user data', () => {
     for (const call of upstream.wireCalls().filter((c) => c.origin === NUTRIHELP_API_ORIGIN)) {
       expect(
         wireCallText(call),
-        `case 6: the inbound MCP access token must never reach a resource endpoint. Invariant 3, plan §4.5. Leaked on ${call.method} ${call.fullUrl}`
+        `case 6: the inbound MCP access token must never reach a resource endpoint. Leaked on ${call.method} ${call.fullUrl}`
       ).not.toContain(tokenForUserA);
     }
 

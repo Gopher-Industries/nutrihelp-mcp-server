@@ -5,8 +5,8 @@
  * the original result and writes nothing. Case 8 asserts the invariant both hold — exactly one
  * write reaches the backend.
  *
- * WILL PASS WHEN: ticket 26 lands the confirmation store and ticket 31 lands `record_meal`. It
- * also needs the backend meal-log write, which is WS2's work.
+ * WILL PASS WHEN: ticket 48 lands the confirmation store and ticket 49 lands `record_meal`. It
+ * also needs the backend meal-log write (tickets 46 and 47), which is WS2's work.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -57,15 +57,19 @@ let server: TestServer;
 let upstream: UpstreamMock;
 let token: string;
 
-/** Writes are counted by method and origin: the meal-log route path is unspecified. */
+/**
+ * NOT just `POST`: a write issued as `PUT` or `PATCH` would otherwise count as zero and pass
+ * every assertion below. The route path is unfixed, so writes are classified by what makes them
+ * dangerous — they mutated state at the API origin.
+ */
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 function writeCalls(): WireCall[] {
   return upstream.wireCalls().filter(
     (call) =>
       call.origin === NUTRIHELP_API_ORIGIN &&
-      call.method.toUpperCase() === 'POST' &&
-      // Audit ingest is a POST to the same origin, and a `started` envelope precedes EVERY
-      // upstream call. Without this exclusion every count gains one per request the moment
-      // ticket 34 lands, and the failure reads as a confirmation-token bug.
+      MUTATING_METHODS.has(call.method.toUpperCase()) &&
+      // Audit ingest is a POST to the same origin and precedes every upstream call.
       !call.path.startsWith(AUDIT_INGEST_PATH)
   );
 }
@@ -81,7 +85,7 @@ function expectConfirmationToken(view: ToolResultView, context: string): string 
 
   expect(
     typeof candidate,
-    `${context}: plan §10.2 requires a pending action carrying a single-use confirmation token. Got: ${view.text.slice(0, 300)}`
+    `${context}: expected a pending action carrying a single-use confirmation token. Got: ${view.text.slice(0, 300)}`
   ).toBe('string');
 
   return typeof candidate === 'string' ? candidate : '';
@@ -147,13 +151,13 @@ describe('two-step write confirmation', () => {
     );
     expect(
       writeCalls(),
-      'case 8 leg 1: plan §10.2 — the first call resolves and summarises, and persists nothing'
+      'case 8 leg 1: the first call resolves and summarises, and persists nothing'
     ).toHaveLength(0);
 
     // Server-side summary: a model-authored one would be the model describing its own write.
     expect(
       proposal.text,
-      'case 8 leg 1: the pending action must carry a human-readable summary of the exact change. Plan §10.2'
+      'case 8 leg 1: the pending action must carry a human-readable summary of the exact change'
     ).toMatch(/porridge/i);
 
     const confirmation = expectConfirmationToken(proposal, 'case 8 leg 1');
@@ -186,13 +190,20 @@ describe('two-step write confirmation', () => {
     );
     expect(
       writeCalls(),
-      'case 8 leg 3: the confirmation token is single use (plan §10.3) and is the idempotency key (plan §7.5). A replay must not produce a second meal-log entry'
+      'case 8 leg 3: the confirmation token is single use and is the idempotency key. A replay must not produce a second meal-log entry'
     ).toHaveLength(1);
 
-    // The write count alone is satisfied by a server that crashed on the replay.
+    // Require structured results on both sides before comparing — undefined === undefined otherwise.
+    const returnedOriginalResult =
+      confirmed.structured !== undefined &&
+      replay.structured !== undefined &&
+      JSON.stringify(replay.structured) === JSON.stringify(confirmed.structured);
+
+    // Either branch is permitted: the token is refused here (single use), or absorbed
+    // idempotently by the backing endpoint. A wire test cannot see which layer answered.
     expect(
-      replay.isError || JSON.stringify(replay.structured) === JSON.stringify(confirmed.structured),
-      'case 8 leg 3: a replay is either an explicit tool error (refused) or the original result returned idempotently (plan §7.5). It is never a protocol error or a crash'
+      replay.isError || returnedOriginalResult,
+      'case 8 leg 3: a replay is either refused or returns the original result. Never a protocol error or a crash, and "no structured result on either side" is not idempotency'
     ).toBe(true);
   });
 
@@ -217,12 +228,10 @@ describe('two-step write confirmation', () => {
       'case 9: the small-meal token presented against the large meal'
     );
 
-    expect(replayed.isError, 'case 9: an argument-hash mismatch is rejected. Plan §10.2').toBe(
-      true
-    );
+    expect(replayed.isError, 'case 9: an argument-hash mismatch is rejected').toBe(true);
     expect(
       writeCalls(),
-      'case 9: nothing may be written when the confirmation does not match the resolved arguments. Plan §10.2'
+      'case 9: nothing may be written when the confirmation does not match the resolved arguments'
     ).toHaveLength(0);
 
     // And the rejection must not leak the larger payload onward in any form.

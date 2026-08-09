@@ -62,7 +62,7 @@ export const CLIENT_ID = 'https://client.test/mcp-client.json';
 export const GRANT_A = 'grant-a-1111';
 
 /**
- * TODO(ticket-24): replace with
+ * TODO(ticket-28): replace with
  * `import { IDENTITY_DENY_LIST } from '../../src/upstream/client.ts'`.
  *
  * Declared here because that module does not exist yet and the module list is fixed.

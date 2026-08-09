@@ -6,11 +6,10 @@ export default defineConfig({
     // `conformance` and `security` as separately named globs.
     include: ['test/**/*.test.ts'],
 
-    // TEMPORARY. `test/unit`, `test/conformance` and `test/integration` are still empty, and
-    // without this `npm test` and `npm run conformance` exit 1 so `validate` can never pass.
-    // REMOVE PER LAYER AS EACH GAINS A SUITE: a green run over an empty glob is the same
-    // fiction as the estate's `|| exit 0`, and one global flag hides it for every layer at once.
-    passWithNoTests: true,
+    // `passWithNoTests` is deliberately NOT set here. Globally it made `npm test` and
+    // `npm run conformance` exit 0 over globs with no files, so `validate` and the pre-push hook
+    // asserted nothing — the same fiction as the estate's `|| exit 0`. It now lives
+    // on the individual scripts for the layers that have no suite yet, so each drops it alone.
 
     coverage: {
       provider: 'v8',

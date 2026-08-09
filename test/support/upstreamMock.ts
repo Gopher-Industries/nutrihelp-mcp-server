@@ -30,6 +30,12 @@ export interface WireCall {
 
 export interface RouteSpec {
   readonly origin?: string;
+  /**
+   * undici matches this against the path INCLUDING the query string, so a literal string fails
+   * to match a handler that correctly sends `?date=...` — surfacing as `MockNotMatchedError`,
+   * i.e. "the tool returned nothing" rather than "the mock is too strict". Use a regex unless
+   * the query is what you are asserting.
+   */
   readonly path: string | RegExp;
   readonly method?: string;
   readonly status: number;

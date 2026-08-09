@@ -1,10 +1,10 @@
 /**
  * Security suite: bounded model-facing output. Ticket 33 case 10.
  *
- * PLAN GAP: a byte ceiling and an explicit truncation marker are required, but neither the
- * number nor the wording is fixed, so neither is asserted. Registered in EXECUTION_LOG.
+ * The byte ceiling is 32 KiB and truncation sets `truncated` + `truncation_note`. Both were
+ * unspecified when this suite was written, so neither is asserted here yet.
  *
- * WILL PASS WHEN: ticket 27 lands `src/shape/bound.ts` and ticket 30 lands `get_meal_plan`.
+ * WILL PASS WHEN: ticket 29 lands `src/shape/bound.ts` and ticket 32 lands `get_meal_plan`.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -117,13 +117,17 @@ describe('a huge upstream response', () => {
 
     const modelFacing = view.text;
 
-    // 1. Row ceiling. PLAN GAP: the output container's name is not fixed, so take the first
-    // array-valued member rather than guessing `entries`/`meals`.
+    // 1. Row ceiling. Assert `entries` by name — a structural array search can pick the wrong one.
     const structured = (view.structured ?? {}) as Record<string, unknown>;
-    const entries = Object.values(structured).find(Array.isArray) ?? [];
+    const rawEntries: unknown = structured.entries;
+    expect(
+      Array.isArray(rawEntries),
+      'case 10: get_meal_plan returns its projected rows in a member named `entries`. A different name is a contract change'
+    ).toBe(true);
+    const entries: unknown[] = Array.isArray(rawEntries) ? rawEntries : [];
     expect(
       entries.length,
-      `case 10: plan §7.3 caps get_meal_plan at ${String(MEAL_ENTRY_CEILING)} meal entries, enforced after the upstream response. Got ${String(entries.length)}`
+      `case 10: get_meal_plan is capped at ${String(MEAL_ENTRY_CEILING)} meal entries, enforced after the upstream response. Got ${String(entries.length)}`
     ).toBeLessThanOrEqual(MEAL_ENTRY_CEILING);
     expect(
       entries.length,
@@ -133,35 +137,31 @@ describe('a huge upstream response', () => {
     // 2. No pass-through.
     expect(
       modelFacing.length,
-      `case 10: plan §6.4 forbids returning an upstream body verbatim. Upstream sent ${String(HUGE_UPSTREAM_BYTES)} bytes`
+      `case 10: an upstream body is never returned verbatim. Upstream sent ${String(HUGE_UPSTREAM_BYTES)} bytes`
     ).toBeLessThan(HUGE_UPSTREAM_BYTES / 10);
 
     // 3. Allowlist projection.
     expect(
       modelFacing,
-      'case 10: `_contractWarnings` is backend response-contract variance and is not in the get_meal_plan projection. Plan §6.4'
+      'case 10: `_contractWarnings` is backend response-contract variance and is not in the get_meal_plan projection'
     ).not.toContain('_contractWarnings');
     expect(
       modelFacing,
-      'case 10: `ingredients` is explicitly excluded from the get_meal_plan output schema. Plan §7.3'
+      'case 10: `ingredients` is explicitly excluded from the get_meal_plan output schema'
     ).not.toContain('ingredient-0');
     expect(
       modelFacing,
-      'case 10: a free-text field the endpoint added later must be stripped by the allowlist, not survive a denylist. Plan §6.4'
+      'case 10: a free-text field the endpoint added later must be stripped by the allowlist, not survive a denylist'
     ).not.toContain(LEAKED_NOTE);
 
     // 4. No internal identifiers or contact fields.
-    expect(modelFacing, 'case 10: no email reaches the model. Plan §6.4').not.toContain(
-      LEAKED_EMAIL
+    expect(modelFacing, 'case 10: no email reaches the model').not.toContain(LEAKED_EMAIL);
+    expect(modelFacing, 'case 10: no internal identifier reaches the model').not.toContain(
+      LEAKED_INTERNAL_ID
     );
-    expect(
-      modelFacing,
-      'case 10: no internal identifier reaches the model. Plan §6.4'
-    ).not.toContain(LEAKED_INTERNAL_ID);
-    expect(
-      modelFacing,
-      'case 10: the user identifier is not a returned field. Plan §6.4, §11.3'
-    ).not.toContain(USER_A);
+    expect(modelFacing, 'case 10: the user identifier is not a returned field').not.toContain(
+      USER_A
+    );
 
     // 5. Dropping rows is explicit, not silent. PLAN GAP: the marker wording attaches to the
     // BYTE ceiling; this is the ROW ceiling, where a count plus a deep link is preferred. So
@@ -173,7 +173,7 @@ describe('a huge upstream response', () => {
       typeof structured.view_all === 'string';
     expect(
       signalsDroppedRows,
-      `case 10: 500 rows became at most ${String(MEAL_ENTRY_CEILING)} and nothing told the model. Plan §6.4 forbids silently dropping data — expected a truncation marker, a total, or a deep link. Model-facing text: ${modelFacing.slice(0, 300)}`
+      `case 10: 500 rows became at most ${String(MEAL_ENTRY_CEILING)} and nothing told the model. Dropping data silently is forbidden — expected a truncation marker, a total, or a deep link. Model-facing text: ${modelFacing.slice(0, 300)}`
     ).toBe(true);
   });
 });
