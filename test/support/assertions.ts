@@ -17,15 +17,15 @@ function describeResponse(response: McpResponse): string {
 export function expectUnauthorizedChallenge(response: McpResponse, context: string): void {
   expect(
     response.status,
-    `${context}: plan §6.5 maps this to 401. Got ${describeResponse(response)}`
+    `${context}: an invalid credential maps to 401. Got ${describeResponse(response)}`
   ).toBe(401);
   expect(
     response.challenge,
-    `${context}: plan §5.4 requires WWW-Authenticate on a 401 from /mcp. Got ${describeResponse(response)}`
+    `${context}: a 401 from /mcp carries WWW-Authenticate. Got ${describeResponse(response)}`
   ).toBeDefined();
   const challenge = response.challenge ?? '';
   expect(challenge, `${context}: the challenge scheme must be Bearer`).toMatch(/^Bearer\b/i);
-  expect(challenge, `${context}: plan §6.5 requires resource_metadata in the challenge`).toContain(
+  expect(challenge, `${context}: the challenge carries resource_metadata`).toContain(
     'resource_metadata'
   );
   expect(challenge, `${context}: resource_metadata must name the RFC 9728 document`).toContain(
@@ -41,16 +41,14 @@ export function expectInsufficientScopeChallenge(
 ): void {
   expect(
     response.status,
-    `${context}: plan §6.5 maps insufficient scope to 403, not 401. Got ${describeResponse(response)}`
+    `${context}: insufficient scope maps to 403, not 401. Got ${describeResponse(response)}`
   ).toBe(403);
   const challenge = response.challenge ?? '';
-  expect(challenge, `${context}: plan §6.5 requires error="insufficient_scope"`).toContain(
+  expect(challenge, `${context}: the challenge carries error="insufficient_scope"`).toContain(
     'insufficient_scope'
   );
-  expect(challenge, `${context}: plan §6.5 requires the required scope in the challenge`).toContain(
-    requiredScope
-  );
-  expect(challenge, `${context}: plan §6.5 requires resource_metadata in the challenge`).toContain(
+  expect(challenge, `${context}: the challenge names the required scope`).toContain(requiredScope);
+  expect(challenge, `${context}: the challenge carries resource_metadata`).toContain(
     'resource_metadata'
   );
 }
@@ -62,11 +60,11 @@ export function expectInsufficientScopeChallenge(
 export function expectNotAnAuthChallenge(response: McpResponse, context: string): void {
   expect(
     response.status,
-    `${context}: plan §4.9 — active:false is the ONLY introspection outcome mapped to 401. Got ${describeResponse(response)}`
+    `${context}: active:false is the ONLY introspection outcome mapped to 401. Got ${describeResponse(response)}`
   ).not.toBe(401);
   expect(
     response.challenge,
-    `${context}: a Bearer challenge here would push the client into refresh-and-retry. Plan §4.9`
+    `${context}: a Bearer challenge here would push the client into refresh-and-retry`
   ).toBeUndefined();
 }
 
