@@ -1,10 +1,4 @@
-import {
-  createRemoteJWKSet,
-  errors,
-  jwtVerify,
-  type JWTPayload,
-  type RemoteJWKSet,
-} from 'jose';
+import { createRemoteJWKSet, errors, jwtVerify, type JWTPayload, type RemoteJWKSet } from 'jose';
 
 /** Ticket 27 pins one asymmetric signing algorithm. */
 export const ACCEPTED_SIGNING_ALGORITHM = 'RS256';
