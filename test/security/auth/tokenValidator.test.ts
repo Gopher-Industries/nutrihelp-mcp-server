@@ -3,7 +3,7 @@
  *
  * Asserts the wire response, never an error class — `src/errors.ts` is blocked on ticket 55.
  *
- * WILL PASS WHEN: ticket 21 lands `src/auth/tokenValidator.ts` and `src/auth/challenge.ts`
+ * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and `src/auth/challenge.ts`
  * and the composition root wires them ahead of dispatch.
  */
 
@@ -95,13 +95,13 @@ describe('inbound token rejection at /mcp', () => {
 
     expectUnauthorizedChallenge(
       await listTools(server, platformToken),
-      'case 1b: deployed platform HS256 token (plan §8.3 row 1) presented to the MCP verifier'
+      'case 1b: a deployed platform HS256 token presented to the MCP verifier'
     );
 
     // Ordering: an always-introspecting implementation passes the assertions above.
     expect(
       upstream.callsTo(INTROSPECTION_PATH),
-      'case 1: refused offline, before live grant introspection. Plan §4.9 step order'
+      'case 1: refused offline, before live grant introspection'
     ).toHaveLength(0);
   });
 
@@ -124,7 +124,7 @@ describe('inbound token rejection at /mcp', () => {
     // Ordering: offline validation precedes live introspection.
     expect(
       upstream.callsTo(INTROSPECTION_PATH),
-      'case 2: refused offline, before live grant introspection. Plan §4.9 step order'
+      'case 2: refused offline, before live grant introspection'
     ).toHaveLength(0);
   });
 
@@ -144,7 +144,7 @@ describe('inbound token rejection at /mcp', () => {
     // Ordering: offline validation precedes live introspection.
     expect(
       upstream.callsTo(INTROSPECTION_PATH),
-      'case 3: an expired token is refused offline, before live grant introspection. Plan §4.9 step order'
+      'case 3: an expired token is refused offline, before live grant introspection'
     ).toHaveLength(0);
   });
 
@@ -177,7 +177,7 @@ describe('inbound token rejection at /mcp', () => {
     // Ordering: none of these ever reaches live introspection.
     expect(
       upstream.callsTo(INTROSPECTION_PATH),
-      'case 4: an unverifiable token is refused offline, before live grant introspection. Plan §4.9 step order'
+      'case 4: an unverifiable token is refused offline, before live grant introspection'
     ).toHaveLength(0);
   });
 
@@ -197,12 +197,12 @@ describe('inbound token rejection at /mcp', () => {
 
     expectUnauthorizedChallenge(
       await listTools(server, wrongType),
-      'wrong type: right key, issuer, audience and expiry, but not an MCP access token. Plan §8.3'
+      'wrong type: right key, issuer, audience and expiry, but not an MCP access token'
     );
 
     expect(
       upstream.callsTo(INTROSPECTION_PATH),
-      'wrong type: refused offline, before live grant introspection. Plan §4.9 step order'
+      'wrong type: refused offline, before live grant introspection'
     ).toHaveLength(0);
   });
 });

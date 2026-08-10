@@ -5,10 +5,12 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * WILL PASS WHEN: ticket 24 lands `src/upstream/client.ts` with the frozen deny-list, and
- * tickets 29 and 30 land the two tools that drive it.
+ * WILL PASS WHEN: ticket 28 lands `src/upstream/client.ts` with the frozen deny-list, and
+ * tickets 26 and 32 land the two tools that drive it.
  */
 
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestKeyPair, makeToken, type TestKeyPair } from '../../../scripts/makeToken.ts';
 import {
@@ -115,6 +117,46 @@ const DRIVEN_TOOLS = [
 ] as const;
 
 describe('a user identifier smuggled into tool arguments', () => {
+  /** Direct deny-list check: the wire test below cannot see it because zod strips undeclared keys. */
+  it('declares every required identity field, and is not silently empty', () => {
+    const REQUIRED = [
+      'user_id',
+      'userId',
+      'email',
+      'targetUserId',
+      'targetEmail',
+      'target_user_id',
+      'target_email',
+    ] as const;
+
+    expect(
+      IDENTITY_DENY_LIST.length,
+      'an empty deny-list passes every wire-absence assertion in this file'
+    ).toBeGreaterThan(0);
+
+    for (const field of REQUIRED) {
+      expect(
+        IDENTITY_DENY_LIST as readonly string[],
+        `"${field}" is stripped on the way out`
+      ).toContain(field);
+    }
+
+    // Positive control: without it, a broken `../../../` walk makes existsSync return false and
+    // the swap guard below passes silently forever.
+    const knownModule = fileURLToPath(new URL('../../../src/transport/http.ts', import.meta.url));
+    expect(existsSync(knownModule), 'the path walk used by the guard below must resolve').toBe(
+      true
+    );
+
+    // Swap guard. testEnv.ts holds a COPY; file existence is used rather than a dynamic import
+    // because the specifier cannot resolve while the file is absent (tsc TS2307).
+    const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
+    expect(
+      existsSync(clientModule),
+      'src/upstream/client.ts now exists, so IDENTITY_DENY_LIST must be imported from it and the copy in testEnv.ts deleted. Until then a production list shorter than the copy passes every assertion here'
+    ).toBe(false);
+  });
+
   /**
    * CASE 7. A user ID smuggled into tool arguments, stripped and ignored.
    *
@@ -157,7 +199,7 @@ describe('a user identifier smuggled into tool arguments', () => {
     for (const call of upstream.callsTo(MEALPLAN_ME_PATH)) {
       expect(
         call.fullUrl,
-        'case 7: the own-user route takes identity from the credential, never from the URL. Plan §8.4'
+        'case 7: the own-user route takes identity from the credential, never from the URL'
       ).not.toContain(USER_A);
       expect(call.fullUrl, 'case 7: no identifier for another user in the URL').not.toContain(
         USER_B

@@ -1,7 +1,7 @@
 /**
  * Security suite: access after disconnection. Ticket 33 case 5.
  *
- * WILL PASS WHEN: ticket 21 lands `src/auth/tokenValidator.ts` and ticket 22 lands
+ * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and ticket 59 lands
  * `src/auth/revocation.ts`, wired ahead of scope, exchange and dispatch.
  */
 
@@ -106,13 +106,13 @@ describe('a grant the user disconnected', () => {
     // A 401 from an offline shortcut would pass the assertions above with revocation absent.
     expect(
       upstream.callsTo(INTROSPECTION_PATH).length,
-      'case 5: live RFC 7662 introspection runs on every request, including tools/list. Plan §4.9'
+      'case 5: live RFC 7662 introspection runs on every request, including tools/list'
     ).toBe(attempts.length);
 
     // The ordering guarantee as an absence: a revoked grant never reaches a cached credential.
     expect(
       upstream.callsTo(TOKEN_EXCHANGE_PATH),
-      'case 5: token exchange must not be reached after an inactive grant. Plan §4.9 mandatory order'
+      'case 5: token exchange must not be reached after an inactive grant'
     ).toHaveLength(0);
     expect(
       [...upstream.callsTo(MEALPLAN_ME_PATH), ...upstream.callsTo(FOODDATA_SEARCH_PATH)],
@@ -132,14 +132,14 @@ describe('a grant the user disconnected', () => {
     // First on purpose: "not a 401" is satisfied by a server that never checked anything.
     expect(
       upstream.callsTo(INTROSPECTION_PATH).length,
-      'companion to case 5: live introspection must have run before the mapping can be judged. Plan §4.9'
+      'companion to case 5: live introspection must have run before the mapping can be judged'
     ).toBe(1);
 
     // Denied, not served. Without this a fail-open server that ignores the 503 and serves
     // tools/list passes: 200 is not 401, and tools/list never exchanges even on success.
     expect(
       response.status,
-      `plan §4.9: an unresolvable introspection result must deny the request. Got HTTP ${String(response.status)}`
+      `an unresolvable introspection result must deny the request. Got HTTP ${String(response.status)}`
     ).toBeGreaterThanOrEqual(400);
 
     expectNotAnAuthChallenge(response, 'companion to case 5: introspection returned 503');
@@ -147,7 +147,7 @@ describe('a grant the user disconnected', () => {
     // And it still fails closed: the request must not reach exchange or a backing endpoint.
     expect(
       upstream.callsTo(TOKEN_EXCHANGE_PATH),
-      'companion to case 5: an unresolvable grant check fails before exchange. Plan §4.9'
+      'companion to case 5: an unresolvable grant check fails before exchange'
     ).toHaveLength(0);
   });
 
@@ -161,12 +161,12 @@ describe('a grant the user disconnected', () => {
     // Same guard: a 4xx from an endpoint that never introspected proves nothing.
     expect(
       upstream.callsTo(INTROSPECTION_PATH).length,
-      'plan §4.9: live introspection must have run before its result can be judged malformed'
+      'live introspection must have run before its result can be judged malformed'
     ).toBe(1);
 
     expect(
       response.status,
-      `plan §4.9: a response with no explicit active result must not permit dispatch. Got HTTP ${String(response.status)}`
+      `a response with no explicit active result must not permit dispatch. Got HTTP ${String(response.status)}`
     ).toBeGreaterThanOrEqual(400);
 
     // Denied, and as the retryable class rather than a challenge.
