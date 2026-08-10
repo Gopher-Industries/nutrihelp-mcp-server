@@ -1,7 +1,7 @@
 /**
  * Security suite: access after disconnection. Ticket 33 case 5.
  *
- * WILL PASS WHEN: ticket 21 lands `src/auth/tokenValidator.ts` and ticket 22 lands
+ * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and ticket 59 lands
  * `src/auth/revocation.ts`, wired ahead of scope, exchange and dispatch.
  */
 

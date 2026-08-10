@@ -5,8 +5,10 @@
  * and 32 `get_meal_plan`. It also needs the backend's `GET /api/mealplan/me`, which is WS2's
  * work in another repository.
  *
- * NO TICKET COVERS `src/auth/revocation.ts`, which this case also depends on — ticket 42 is the
- * backend's disconnection endpoint, not the MCP-side live introspection.
+ * This case also depends on `src/auth/revocation.ts`, the MCP-side live introspection call.
+ * Ticket 59 covers it. Ticket 42 is the backend's connection-status and disconnection endpoint —
+ * the status half is what this calls on every request; the disconnection half is what makes a
+ * status flip.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

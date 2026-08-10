@@ -3,7 +3,7 @@
  *
  * Asserts the wire response, never an error class — `src/errors.ts` is blocked on ticket 55.
  *
- * WILL PASS WHEN: ticket 21 lands `src/auth/tokenValidator.ts` and `src/auth/challenge.ts`
+ * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and `src/auth/challenge.ts`
  * and the composition root wires them ahead of dispatch.
  */
 
