@@ -1,10 +1,11 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
-/* ONE EGRESS DOOR. Four axes have to be walked, and this rule has been recorded "verified" after
- * walking only some of them four times running. Current state, each verified by a probe run that
- * included a known-blocked positive control (a run without one proves nothing — a broken harness
- * reports every case clean):
+/* ONE EGRESS DOOR — DEFENCE IN DEPTH, NOT THE BOUNDARY. The boundary is architectural: one module
+ * makes outbound calls, and that is held by the upstream design and by review. These selectors
+ * were recorded "verified" after walking only some of the axes five times running, so read the
+ * list below as state, not as a closure claim. The control is the frozen case table in
+ * test/security/egress.test.ts, plus the banned-module list, plus review.
  *
  *   1. MODULE SPECIFIER   bare / node:-prefixed / subpath / static / dynamic, plus non-literal
  *                         and computed dynamic specifiers, which a `source.value` test cannot see
@@ -14,11 +15,13 @@ import tseslint from 'typescript-eslint';
  *                         it must join EGRESS_RECEIVERS in that same change
  *   4. GUARDED IDENTIFIER `fetch` is not the only global that opens a socket. `WebSocket` needs
  *                         no import at all. Adding an egress primitive here is a security change
+ *   5. RESOLVER           who hands the capability back, which axes 1-4 never ask:
+ *                         `process.getBuiltinModule`, `eval`, `Function`
  *
- * Axis 3 is UNBOUNDED and no selector list closes it: any expression evaluating to the global
- * object defeats a syntactic match. The cheap high-traffic productions are covered below; the
- * remainder is held by the banned-module list, by review, and by test/security/lint/egress.test.ts
- * — not by these selectors. Do not read the selector list as the control.
+ * Axis 3 is UNBOUNDED and no selector list closes it. What is matched is the declarator, cast,
+ * assignment and parameter-default productions, and nothing else: `Reflect.get`, object and array
+ * literal capture, function return and `PropertyDefinition` all still reach the object. Out of
+ * scope by decision — do not chase them with more selectors.
  */
 const EGRESS_BUILTINS = [
   'http',
@@ -32,6 +35,11 @@ const EGRESS_BUILTINS = [
   'module',
   'dns',
   'worker_threads',
+  'vm',
+  'cluster',
+  'repl',
+  'inspector',
+  'process',
 ];
 const EGRESS_PACKAGES = ['undici', 'axios', 'node-fetch'];
 /** Globals that open an outbound connection with no import. Adding one is a security change. */
@@ -71,14 +79,22 @@ const EXEMPT_ZONES = {
  *  "Unterminated group" on every file. */
 const SLASH = String.raw`\x2F`;
 
-/** `no-restricted-imports` never sees a dynamic import, so EXEMPT_ZONES needs this counterpart.
- *  Separate from EGRESS_IMPORT_SYNTAX because the module exempt from the egress selectors is
- *  not exempt from this one. */
-const EXEMPT_ZONE_SYNTAX = [
+/** Selectors that are NOT part of the egress group, so the one egress door inherits them too.
+ *  It is exempt from calling out, not from laundering an exemption or building code from a
+ *  string. Any zone that overrides `no-restricted-syntax` must restate these. */
+const NON_EGRESS_SYNTAX = [
   {
+    // `no-restricted-imports` never sees a dynamic import, so EXEMPT_ZONES needs a counterpart.
     selector: `ImportExpression[source.value=/(^|${SLASH})(scripts|test)${SLASH}/]`,
     message:
       'src/** may not import scripts/** or test/**, dynamically either. Both are exempt from the egress rules, so importing one launders the exemption.',
+  },
+  {
+    // `no-new-func` only fires where the `Function` global is directly the callee, so the alias
+    // walks past it — and an alias is exactly what gets reached for once the direct form errors.
+    selector: 'VariableDeclarator[init.name=/^(Function|eval)$/]',
+    message:
+      'Aliasing `Function` or `eval` is not a way around no-new-func and no-eval. Nothing here builds code from a string.',
   },
 ];
 
@@ -143,7 +159,27 @@ const EGRESS_FETCH_SYNTAX = [
   },
 ];
 
-const EGRESS_SYNTAX = [...EGRESS_IMPORT_SYNTAX, ...EGRESS_FETCH_SYNTAX, ...EXEMPT_ZONE_SYNTAX];
+/** Axis 5. In the egress group, so the door is exempt for the same reason it may import a
+ *  builtin. The other two resolvers, `eval` and `Function`, are not: see NON_EGRESS_SYNTAX. */
+const EGRESS_RESOLVER_SYNTAX = [
+  {
+    selector: "MemberExpression[object.name='process'][property.name='getBuiltinModule']",
+    message:
+      'Only src/upstream/client.ts may call out. `process.getBuiltinModule` hands back the module registry, which resolves every banned module.',
+  },
+  {
+    selector: "MemberExpression[object.name='process'][computed=true]",
+    message:
+      'Only src/upstream/client.ts may call out. Computed access to `process` is not a way around the resolver ban.',
+  },
+];
+
+const EGRESS_SYNTAX = [
+  ...EGRESS_IMPORT_SYNTAX,
+  ...EGRESS_FETCH_SYNTAX,
+  ...EGRESS_RESOLVER_SYNTAX,
+  ...NON_EGRESS_SYNTAX,
+];
 
 // Specifiers carry `.ts`: Node type-stripping runs the entrypoint directly.
 
@@ -214,6 +250,10 @@ export default tseslint.config(
       'no-restricted-imports': restrictedImports(),
       'no-restricted-syntax': ['error', ...EGRESS_SYNTAX],
 
+      // The other two axis-5 resolvers. Unscoped: nothing here builds code from a string.
+      'no-eval': 'error',
+      'no-new-func': 'error',
+
       'no-empty': ['error', { allowEmptyCatch: false }],
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
@@ -232,10 +272,9 @@ export default tseslint.config(
       // `upstreamClient` is deliberately NOT set: CHAIN_UPSTREAM only ever meant "do not import
       // some other upstream client", and exempting the highest-value module from it buys nothing.
       'no-restricted-imports': restrictedImports({ egress: true }),
-      // Restated, not `'off'`: an override silently drops any non-egress selector added to the
-      // base block, and one now exists. `['error', ...selectors]` replaces the options; a bare
-      // `['error']` RETAINS them, which once left all four egress selectors on this very module.
-      'no-restricted-syntax': ['error', ...EXEMPT_ZONE_SYNTAX],
+      // `['error', ...selectors]` replaces the options; a bare `['error']` RETAINS them, which
+      // once left all four egress selectors in force on this very module.
+      'no-restricted-syntax': ['error', ...NON_EGRESS_SYNTAX],
     },
   },
 

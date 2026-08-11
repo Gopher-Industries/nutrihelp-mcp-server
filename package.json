@@ -19,10 +19,11 @@
     "test": "vitest run test/unit --passWithNoTests",
     "conformance": "vitest run test/conformance",
     "test:security": "vitest run test/security",
+    "test:controls": "vitest run test/security/egress.test.ts",
     "test:integration": "vitest run test/integration --passWithNoTests",
     "coverage": "vitest run --coverage",
     "security:audit": "npm audit --audit-level=high",
-    "validate": "npm run check:node && npm run typecheck && npm run lint && npm run format:check && npm test && npm run conformance && npm run security:audit",
+    "validate": "npm run check:node && npm run typecheck && npm run lint && npm run format:check && npm test && npm run conformance && npm run test:controls && npm run security:audit",
     "prepare": "husky"
   },
   "repository": {

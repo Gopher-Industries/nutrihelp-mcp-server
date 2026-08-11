@@ -9,6 +9,10 @@
  * design pending modules that do not exist. This one tests configuration that exists today, so a
  * red row here is a live gap in a security control and must be reported, never skipped.
  *
+ * That is why `validate` chains `test:controls`, which runs THIS FILE, rather than
+ * `test:security`, whose red-by-design cases would leave the pre-push hook permanently red.
+ * Moving or renaming this file turns `validate` red: a filter matching nothing exits 1.
+ *
  * HOW IT WORKS: snippets are linted through the ESLint Node API with a `filePath` that selects
  * the config zone. `lintText` never reads that path, so the same snippet can be asserted blocked
  * under `src/auth/` and permitted under `src/upstream/client.ts` with nothing on disk. Snippets
@@ -24,6 +28,7 @@
  * linting, which is why `expectNoFatal` runs on every row and the harness self-check runs first.
  */
 
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ESLint } from 'eslint';
@@ -31,7 +36,7 @@ import type { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { beforeAll, describe, expect, it } from 'vitest';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 /**
  * Zone selectors. None of these files needs to exist, and none of them does today.
@@ -54,6 +59,8 @@ const EGRESS_RULE_IDS = [
   'no-restricted-globals',
   'no-restricted-syntax',
   'no-restricted-imports',
+  'no-eval',
+  'no-new-func',
 ] as const;
 type EgressRuleId = (typeof EGRESS_RULE_IDS)[number];
 
@@ -166,6 +173,15 @@ const clean = (zone: string, rows: readonly Omit<CleanRow, 'zone'>[]): CleanRow[
 /* ------------------------------------------------------------------------------------------ */
 
 describe('harness self-check', () => {
+  it('resolves a REPO_ROOT that holds the config under test', () => {
+    // Moving this file changes how many levels up the root is, and every row below then fails
+    // for that reason alone.
+    expect(
+      existsSync(path.join(REPO_ROOT, 'eslint.config.js')),
+      `REPO_ROOT resolved to ${REPO_ROOT}, which holds no eslint.config.js.`
+    ).toBe(true);
+  });
+
   it('reports a known-bad snippet as blocked', async () => {
     const outcome = await lintSnippet(`export const r = await fetch('https://x');\n`, ZONE.auth);
     expectNoFatal(outcome, ZONE.auth);
@@ -237,6 +253,17 @@ const AXIS_1_MODULE_SPECIFIER: BlockedRow[] = blockedBy(ZONE.auth, 'no-restricte
   },
   { name: "import 'axios'", code: `import axios from 'axios';\nexport const x = axios;\n` },
   { name: "import 'node-fetch'", code: `import f from 'node-fetch';\nexport const x = f;\n` },
+  { name: "import 'node:vm'", code: `import vm from 'node:vm';\nexport const x = vm;\n` },
+  { name: "import 'node:cluster'", code: `import c from 'node:cluster';\nexport const x = c;\n` },
+  { name: "import 'node:repl'", code: `import r from 'node:repl';\nexport const x = r;\n` },
+  {
+    name: "import 'node:inspector'",
+    code: `import i from 'node:inspector';\nexport const x = i;\n`,
+  },
+  {
+    name: "import 'node:process'",
+    code: `import p from 'node:process';\nexport const x = p;\n`,
+  },
 ]);
 
 const AXIS_1_DYNAMIC: BlockedRow[] = blockedBy(ZONE.auth, 'no-restricted-syntax', [
@@ -367,6 +394,61 @@ describe('axis 4: guarded identifier', () => {
   it.each(AXIS_4_GUARDED_IDENTIFIER)('blocks $name', expectBlocked);
 });
 
+/* --- Axis 5: resolver -----------------------------------------------------------------------
+ * Axes 1 to 4 all ask how the capability is NAMED. None asks who hands it back. The resolver
+ * list is short and enumerable: `process`, `eval`, `Function`. */
+
+const AXIS_5_RESOLVER: BlockedRow[] = blocked(ZONE.auth, [
+  {
+    name: "process.getBuiltinModule('node:module')",
+    code: `const m = process.getBuiltinModule('node:module');\nexport const x = m;\n`,
+    rule: 'no-restricted-syntax',
+  },
+  {
+    name: "process['getBuiltinModule']('node:module')",
+    code: `const m = process['getBuiltinModule']('node:module');\nexport const x = m;\n`,
+    rule: 'no-restricted-syntax',
+  },
+  {
+    name: "eval('fetch')",
+    code: `export const f = eval('fetch');\n`,
+    rule: 'no-eval',
+  },
+  {
+    name: "new Function('return fetch')",
+    code: `export const f = new Function('return fetch')();\n`,
+    rule: 'no-new-func',
+  },
+  {
+    name: "Function('return fetch') without new",
+    code: `export const f = Function('return fetch')();\n`,
+    rule: 'no-new-func',
+  },
+  {
+    // Caught by a selector, not by no-new-func — hence the rule id on this row.
+    name: "const F = Function; new F('return fetch')",
+    code: `const F = Function;\nexport const f = new F('return fetch')();\n`,
+    rule: 'no-restricted-syntax',
+  },
+  {
+    name: 'const e = eval',
+    code: `const e = eval;\nexport const f = e('fetch');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+/** `process.env` is how configuration is read. A resolver selector that fires on it would be
+ *  relaxed within a day, and the relaxation would take the rest of axis 5 with it. */
+const AXIS_5_PERMITTED: CleanRow[] = clean(ZONE.auth, [
+  { name: 'process.env.PORT', code: `export const p = process.env.PORT;\n` },
+  { name: 'process.exit(1)', code: `export function die() {\n  process.exit(1);\n}\n` },
+]);
+
+describe('axis 5: resolver', () => {
+  it.each(AXIS_5_RESOLVER)('blocks $name', expectBlocked);
+  it.each(AXIS_5_PERMITTED)('permits $name', expectClean);
+});
+
 /* --- The tools zone -------------------------------------------------------------------------
  * A `files:` override REPLACES a rule's options rather than merging them, and src/tools/**
  * overrides `no-restricted-syntax` for its own description check. If the egress selectors were
@@ -417,6 +499,26 @@ const DOOR_PERMITTED: CleanRow[] = clean(ZONE.door, [
   { name: "import 'node:http'", code: `import http from 'node:http';\nexport const x = http;\n` },
   { name: "await import('node:http')", code: `export const m = await import('node:http');\n` },
   { name: 'new WebSocket(url)', code: `export const s = new WebSocket('wss://x');\n` },
+  {
+    // Deliberate: the door may resolve a builtin for the same reason it may import one.
+    name: "process.getBuiltinModule('node:http')",
+    code: `export const m = process.getBuiltinModule('node:http');\n`,
+  },
+]);
+
+/** The door is exempt from the egress selectors, not from everything. It has no reason to eval. */
+const DOOR_STILL_BLOCKED_RESOLVERS: BlockedRow[] = blocked(ZONE.door, [
+  { name: "eval('fetch')", code: `export const f = eval('fetch');\n`, rule: 'no-eval' },
+  {
+    name: "new Function('return fetch')",
+    code: `export const f = new Function('return fetch')();\n`,
+    rule: 'no-new-func',
+  },
+  {
+    name: 'const F = Function (the alias the door also does not get)',
+    code: `const F = Function;\nexport const f = new F('return fetch')();\n`,
+    rule: 'no-restricted-syntax',
+  },
 ]);
 
 /**
@@ -442,6 +544,7 @@ const DOOR_STILL_BLOCKED: BlockedRow[] = blockedBy(ZONE.door, 'no-restricted-imp
 describe('the one egress door', () => {
   it.each(DOOR_PERMITTED)('permits $name', expectClean);
   it.each(DOOR_STILL_BLOCKED)('still blocks $name', expectBlocked);
+  it.each(DOOR_STILL_BLOCKED_RESOLVERS)('still blocks $name', expectBlocked);
 });
 
 /* --- The test zone --------------------------------------------------------------------------
