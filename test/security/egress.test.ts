@@ -48,6 +48,8 @@ const ZONE = {
   door: 'src/upstream/client.ts',
   tests: 'test/unit/example.test.ts',
   scripts: 'scripts/makeToken.ts',
+  eslintConfig: 'eslint.config.js',
+  vitestConfig: 'vitest.config.ts',
 } as const;
 
 /**
@@ -594,14 +596,21 @@ describe('the test zone', () => {
  * rows. Neither half means anything alone — blocked rows alone would be satisfied by deleting an
  * exemption that the version guard needs. */
 
-const EXEMPT_ZONE_PERMITTED: CleanRow[] = clean(ZONE.scripts, [
-  { name: 'globalThis.fetch', code: `export const send = globalThis.fetch;\n` },
-  { name: 'bare fetch', code: `export const r = await fetch('https://x');\n` },
-  {
-    name: "import 'undici'",
-    code: `import { request } from 'undici';\nexport const x = request;\n`,
-  },
-]);
+const ALIAS = `export const send = globalThis.fetch;\n`;
+
+/** One row per exempt zone: a zone with no row here is one whose containment nobody checked. */
+const EXEMPT_ZONE_PERMITTED: CleanRow[] = [
+  ...clean(ZONE.scripts, [
+    { name: 'globalThis.fetch', code: ALIAS },
+    { name: 'bare fetch', code: `export const r = await fetch('https://x');\n` },
+    {
+      name: "import 'undici'",
+      code: `import { request } from 'undici';\nexport const x = request;\n`,
+    },
+  ]),
+  ...clean(ZONE.eslintConfig, [{ name: 'globalThis.fetch', code: ALIAS }]),
+  ...clean(ZONE.vitestConfig, [{ name: 'globalThis.fetch', code: ALIAS }]),
+];
 
 const SRC_MAY_NOT_IMPORT_EXEMPT_ZONES: BlockedRow[] = blocked(ZONE.auth, [
   {
@@ -618,6 +627,26 @@ const SRC_MAY_NOT_IMPORT_EXEMPT_ZONES: BlockedRow[] = blocked(ZONE.auth, [
     // `no-restricted-imports` never sees a dynamic import.
     name: "await import('../../scripts/launder.ts')",
     code: `export const m = await import('../../scripts/launder.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+  {
+    name: 'import vitest.config.ts',
+    code: `import { send } from '../../vitest.config.ts';\nexport const r = await send('https://x');\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: 'import eslint.config.js',
+    code: `import { send } from '../../eslint.config.js';\nexport const r = await send('https://x');\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "await import('../../vitest.config.ts')",
+    code: `export const m = await import('../../vitest.config.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+  {
+    name: "await import('../../eslint.config.js')",
+    code: `export const m = await import('../../eslint.config.js');\n`,
     rule: 'no-restricted-syntax',
   },
 ]);
@@ -658,7 +687,7 @@ const TESTS_MAY_STILL_IMPORT_SCRIPTS: CleanRow[] = clean(ZONE.tests, [
 ]);
 
 describe('the exempt zones', () => {
-  it.each(EXEMPT_ZONE_PERMITTED)('permits $name in scripts/', expectClean);
+  it.each(EXEMPT_ZONE_PERMITTED)('permits $name in $zone', expectClean);
   it.each(SRC_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops src/auth laundering via $name', expectBlocked);
   it.each(TOOLS_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops src/tools laundering via $name', expectBlocked);
   it.each(DOOR_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops the door laundering via $name', expectBlocked);
@@ -667,6 +696,20 @@ describe('the exempt zones', () => {
 
 /* --- Ordinary code --------------------------------------------------------------------------
  * The rule must not fire on code that goes nowhere near the network. */
+
+/** Asserted only at the door until now, so dropping this group from every guarded zone was a
+ *  mutation the suite did not catch. */
+const ESTATE_MIDDLEWARE: BlockedRow[] = blockedBy(ZONE.auth, 'no-restricted-imports', [
+  { name: "import 'cors'", code: `import cors from 'cors';\nexport const x = cors;\n` },
+  {
+    name: "import 'express-rate-limit'",
+    code: `import rateLimit from 'express-rate-limit';\nexport const x = rateLimit;\n`,
+  },
+]);
+
+describe('estate middleware is not inherited', () => {
+  it.each(ESTATE_MIDDLEWARE)('blocks $name', expectBlocked);
+});
 
 const ORDINARY: CleanRow[] = clean(ZONE.auth, [
   { name: 'an object literal', code: `export const x = { a: 1 };\n` },
@@ -683,4 +726,44 @@ const ORDINARY: CleanRow[] = clean(ZONE.auth, [
 
 describe('ordinary code', () => {
   it.each(ORDINARY)('permits $name', expectClean);
+});
+
+/* --- Suite completeness ---------------------------------------------------------------------
+ * `it.each([])` registers nothing and the file still exits 0, so emptying a table deletes its
+ * rows in silence and the suite just gets quieter. The floor only ever goes up. */
+
+const ALL_ROWS: readonly (readonly (BlockedRow | CleanRow)[])[] = [
+  AXIS_1_MODULE_SPECIFIER,
+  AXIS_1_DYNAMIC,
+  AXIS_2_REFERENCE_FORM,
+  AXIS_3_RECEIVER,
+  AXIS_4_GUARDED_IDENTIFIER,
+  AXIS_5_RESOLVER,
+  AXIS_5_PERMITTED,
+  TOOLS_ZONE,
+  DOOR_PERMITTED,
+  DOOR_STILL_BLOCKED,
+  DOOR_STILL_BLOCKED_RESOLVERS,
+  TEST_ZONE_PERMITTED,
+  TEST_ZONE_BLOCKED,
+  EXEMPT_ZONE_PERMITTED,
+  SRC_MAY_NOT_IMPORT_EXEMPT_ZONES,
+  TOOLS_MAY_NOT_IMPORT_EXEMPT_ZONES,
+  DOOR_MAY_NOT_IMPORT_EXEMPT_ZONES,
+  TESTS_MAY_STILL_IMPORT_SCRIPTS,
+  ESTATE_MIDDLEWARE,
+  ORDINARY,
+];
+
+const ROW_FLOOR = 100;
+
+describe('suite completeness', () => {
+  it(`carries at least ${String(ROW_FLOOR)} rows`, () => {
+    const total = ALL_ROWS.reduce((count, rows) => count + rows.length, 0);
+    expect(
+      total,
+      `The frozen table has ${String(total)} rows, below the floor of ${String(ROW_FLOOR)}. ` +
+        `Rows were deleted, or a table was emptied — which registers no tests and exits 0.`
+    ).toBeGreaterThanOrEqual(ROW_FLOOR);
+  });
 });

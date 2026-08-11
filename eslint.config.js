@@ -66,13 +66,24 @@ const ESTATE_MIDDLEWARE_GROUP = {
   message: 'Estate middleware is not inherited.',
 };
 
-/** `scripts/**` and `test/**` are exempt from every egress rule, so importing either from `src/**`
- *  launders the exemption into a guarded module. When a zone is exempted, ban the guarded zones
- *  from importing it in the same change. */
+/** The zones exempt from the egress rules. The exemption and its containment are generated from
+ *  these two lists, because two hand-maintained copies of one set drift and each reads complete
+ *  on its own — the first version of this ban covered `scripts` and `test` while the `files:`
+ *  block below also exempted the two config files, leaving both importable from `src/**`. */
+const EXEMPT_DIRS = ['scripts', 'test'];
+const EXEMPT_CONFIG_FILES = ['eslint.config.js', 'vitest.config.ts'];
+
+/** `files:` for the blanket-off block below. `test/**` is exempt from the import rules only and
+ *  keeps its own block, so it is not here — but it is still contained by EXEMPT_ZONES. */
+const FULLY_EXEMPT_FILES = ['scripts/**', ...EXEMPT_CONFIG_FILES];
+
 const EXEMPT_ZONES = {
-  group: ['**/scripts/*', '**/scripts/**', '**/test/*', '**/test/**'],
+  group: [
+    ...EXEMPT_DIRS.flatMap((dir) => [`**/${dir}/*`, `**/${dir}/**`]),
+    ...EXEMPT_CONFIG_FILES.map((file) => `**/${file}`),
+  ],
   message:
-    'src/** may not import scripts/** or test/**. Both are exempt from the egress rules, so importing one launders the exemption into a guarded module. Shared code belongs in src/.',
+    'src/** may not import an egress-exempt zone: scripts/**, test/**, eslint.config.js or vitest.config.ts. Each is exempt from the egress rules, so importing one launders the exemption into a guarded module. Shared code belongs in src/.',
 };
 
 /** Separator must be `\x2F`: esquery ends its regex literal at the first bare `/`, which throws
@@ -85,9 +96,11 @@ const SLASH = String.raw`\x2F`;
 const NON_EGRESS_SYNTAX = [
   {
     // `no-restricted-imports` never sees a dynamic import, so EXEMPT_ZONES needs a counterpart.
-    selector: `ImportExpression[source.value=/(^|${SLASH})(scripts|test)${SLASH}/]`,
+    selector: `ImportExpression[source.value=/(^|${SLASH})(${EXEMPT_DIRS.join('|')})${SLASH}|(^|${SLASH})(${EXEMPT_CONFIG_FILES.map(
+      (file) => file.replaceAll('.', String.raw`\.`)
+    ).join('|')})$/]`,
     message:
-      'src/** may not import scripts/** or test/**, dynamically either. Both are exempt from the egress rules, so importing one launders the exemption.',
+      'src/** may not import an egress-exempt zone, dynamically either. Each is exempt from the egress rules, so importing one launders the exemption.',
   },
   {
     // `no-new-func` only fires where the `Function` global is directly the callee, so the alias
@@ -339,7 +352,8 @@ export default tseslint.config(
   },
 
   {
-    files: ['scripts/**', 'eslint.config.js', 'vitest.config.ts'],
+    // A raw string added here rather than to EXEMPT_CONFIG_FILES reopens the laundering path.
+    files: FULLY_EXEMPT_FILES,
     rules: {
       'no-restricted-imports': 'off',
       'no-restricted-globals': 'off',
