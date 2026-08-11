@@ -42,6 +42,7 @@ const ZONE = {
   tools: 'src/tools/getMealPlan.ts',
   door: 'src/upstream/client.ts',
   tests: 'test/unit/example.test.ts',
+  scripts: 'scripts/makeToken.ts',
 } as const;
 
 /**
@@ -481,6 +482,84 @@ const TEST_ZONE_BLOCKED: BlockedRow[] = blocked(ZONE.tests, [
 describe('the test zone', () => {
   it.each(TEST_ZONE_PERMITTED)('permits $name', expectClean);
   it.each(TEST_ZONE_BLOCKED)('still blocks $name', expectBlocked);
+});
+
+/* --- The exempt zones, and what stops them laundering the exemption --------------------------
+ * `scripts/**` and `test/**` are exempt on purpose: the version guard must run on the versions it
+ * rejects, and the mocking strategy imports MockAgent directly. An exemption reachable by an
+ * ordinary import is a hole, so the containment rows live in the same block as the exemption
+ * rows. Neither half means anything alone — blocked rows alone would be satisfied by deleting an
+ * exemption that the version guard needs. */
+
+const EXEMPT_ZONE_PERMITTED: CleanRow[] = clean(ZONE.scripts, [
+  { name: 'globalThis.fetch', code: `export const send = globalThis.fetch;\n` },
+  { name: 'bare fetch', code: `export const r = await fetch('https://x');\n` },
+  {
+    name: "import 'undici'",
+    code: `import { request } from 'undici';\nexport const x = request;\n`,
+  },
+]);
+
+const SRC_MAY_NOT_IMPORT_EXEMPT_ZONES: BlockedRow[] = blocked(ZONE.auth, [
+  {
+    name: 'the laundering PoC: a fetch alias imported from scripts/',
+    code: `import { send } from '../../scripts/launder.ts';\nexport const r = await send('https://x');\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: 'import from test/',
+    code: `import { env } from '../../test/support/testEnv.ts';\nexport const x = env;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    // `no-restricted-imports` never sees a dynamic import.
+    name: "await import('../../scripts/launder.ts')",
+    code: `export const m = await import('../../scripts/launder.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+const TOOLS_MAY_NOT_IMPORT_EXEMPT_ZONES: BlockedRow[] = blockedBy(
+  ZONE.tools,
+  'no-restricted-imports',
+  [
+    {
+      name: 'import from scripts/',
+      code: `import { send } from '../../scripts/launder.ts';\nexport const x = send;\n`,
+    },
+  ]
+);
+
+/** The dynamic row is the one that catches a future `no-restricted-syntax: 'off'` in the door
+ *  zone, which would silently drop this selector along with the egress ones. */
+const DOOR_MAY_NOT_IMPORT_EXEMPT_ZONES: BlockedRow[] = blocked(ZONE.door, [
+  {
+    name: 'import from scripts/',
+    code: `import { send } from '../../scripts/launder.ts';\nexport const x = send;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "await import('../../scripts/launder.ts')",
+    code: `export const m = await import('../../scripts/launder.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+/** `makeToken` lives in `scripts/` so it does not ship in `dist/`, and the test tree imports it.
+ *  The containment must not break that. */
+const TESTS_MAY_STILL_IMPORT_SCRIPTS: CleanRow[] = clean(ZONE.tests, [
+  {
+    name: "import 'scripts/makeToken.ts'",
+    code: `import { makeToken } from '../../scripts/makeToken.ts';\nexport const x = makeToken;\n`,
+  },
+]);
+
+describe('the exempt zones', () => {
+  it.each(EXEMPT_ZONE_PERMITTED)('permits $name in scripts/', expectClean);
+  it.each(SRC_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops src/auth laundering via $name', expectBlocked);
+  it.each(TOOLS_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops src/tools laundering via $name', expectBlocked);
+  it.each(DOOR_MAY_NOT_IMPORT_EXEMPT_ZONES)('stops the door laundering via $name', expectBlocked);
+  it.each(TESTS_MAY_STILL_IMPORT_SCRIPTS)('still permits $name from test/', expectClean);
 });
 
 /* --- Ordinary code --------------------------------------------------------------------------

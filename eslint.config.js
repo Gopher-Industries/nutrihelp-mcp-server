@@ -58,9 +58,30 @@ const ESTATE_MIDDLEWARE_GROUP = {
   message: 'Estate middleware is not inherited.',
 };
 
+/** `scripts/**` and `test/**` are exempt from every egress rule, so importing either from `src/**`
+ *  launders the exemption into a guarded module. When a zone is exempted, ban the guarded zones
+ *  from importing it in the same change. */
+const EXEMPT_ZONES = {
+  group: ['**/scripts/*', '**/scripts/**', '**/test/*', '**/test/**'],
+  message:
+    'src/** may not import scripts/** or test/**. Both are exempt from the egress rules, so importing one launders the exemption into a guarded module. Shared code belongs in src/.',
+};
+
 /** Separator must be `\x2F`: esquery ends its regex literal at the first bare `/`, which throws
  *  "Unterminated group" on every file. */
 const SLASH = String.raw`\x2F`;
+
+/** `no-restricted-imports` never sees a dynamic import, so EXEMPT_ZONES needs this counterpart.
+ *  Separate from EGRESS_IMPORT_SYNTAX because the module exempt from the egress selectors is
+ *  not exempt from this one. */
+const EXEMPT_ZONE_SYNTAX = [
+  {
+    selector: `ImportExpression[source.value=/(^|${SLASH})(scripts|test)${SLASH}/]`,
+    message:
+      'src/** may not import scripts/** or test/**, dynamically either. Both are exempt from the egress rules, so importing one launders the exemption.',
+  },
+];
+
 const EGRESS_DYNAMIC_RE =
   `^(node:)?(${EGRESS_BUILTINS.join('|')})(${SLASH}.*)?$` +
   `|^(${EGRESS_PACKAGES.join('|')})(${SLASH}.*)?$`;
@@ -122,7 +143,7 @@ const EGRESS_FETCH_SYNTAX = [
   },
 ];
 
-const EGRESS_SYNTAX = [...EGRESS_IMPORT_SYNTAX, ...EGRESS_FETCH_SYNTAX];
+const EGRESS_SYNTAX = [...EGRESS_IMPORT_SYNTAX, ...EGRESS_FETCH_SYNTAX, ...EXEMPT_ZONE_SYNTAX];
 
 // Specifiers carry `.ts`: Node type-stripping runs the entrypoint directly.
 
@@ -154,7 +175,8 @@ function restrictedImports(
   { egress = false, upstreamClient = false, toolModules = false, config = false } = {},
   extra = []
 ) {
-  const patterns = [ESTATE_MIDDLEWARE_GROUP];
+  // EXEMPT_ZONES has no flag: a flag would be a switch for turning the laundering path back on.
+  const patterns = [ESTATE_MIDDLEWARE_GROUP, EXEMPT_ZONES];
   if (!egress) patterns.push(EGRESS_MODULE_GROUP);
   if (!upstreamClient) patterns.push(CHAIN_UPSTREAM);
   if (!toolModules) patterns.push(CHAIN_TOOL_MODULES);
@@ -210,13 +232,10 @@ export default tseslint.config(
       // `upstreamClient` is deliberately NOT set: CHAIN_UPSTREAM only ever meant "do not import
       // some other upstream client", and exempting the highest-value module from it buys nothing.
       'no-restricted-imports': restrictedImports({ egress: true }),
-      // `'off'` is required here, and `['error']` is NOT a safer spelling of it: configuring a
-      // rule with a severity alone RETAINS the previous options, so `['error']` left all four
-      // egress selectors in force and would have blocked the one module allowed to call out.
-      // Verified with `eslint --print-config`. The consequence is that any NON-egress selector
-      // added to the base `no-restricted-syntax` is silently dropped here — if one is ever
-      // added, restate it in this block.
-      'no-restricted-syntax': 'off',
+      // Restated, not `'off'`: an override silently drops any non-egress selector added to the
+      // base block, and one now exists. `['error', ...selectors]` replaces the options; a bare
+      // `['error']` RETAINS them, which once left all four egress selectors on this very module.
+      'no-restricted-syntax': ['error', ...EXEMPT_ZONE_SYNTAX],
     },
   },
 
