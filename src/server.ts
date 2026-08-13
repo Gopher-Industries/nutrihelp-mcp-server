@@ -15,7 +15,7 @@ const app = createHttpApp({
       name: 'nutrihelp-mcp-server',
       version: '1.0.0',
     });
-    
+
     registerTools(server, ctx, config);
 
     return server;
@@ -29,4 +29,3 @@ const app = createHttpApp({
 app.listen(config.port, () => {
   console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
 });
-

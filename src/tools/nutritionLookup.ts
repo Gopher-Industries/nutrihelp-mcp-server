@@ -6,9 +6,20 @@ interface NutritionLookupConfig {
   readonly nutrihelpApiUrl: string;
 }
 const NUTRITION_FIELDS = [
-  'category', 'name', 'calories', 'fat', 'carbohydrates', 'protein',
-  'fiber', 'vitamin_a', 'vitamin_b', 'vitamin_c', 'vitamin_d', 'sodium',
-  'sugar', 'allergies_type',
+  'category',
+  'name',
+  'calories',
+  'fat',
+  'carbohydrates',
+  'protein',
+  'fiber',
+  'vitamin_a',
+  'vitamin_b',
+  'vitamin_c',
+  'vitamin_d',
+  'sodium',
+  'sugar',
+  'allergies_type',
 ] as const;
 
 const MAX_RESULTS = 10;
@@ -52,7 +63,8 @@ export function registerNutritionLookup(server: McpServer, config: NutritionLook
     'nutrition_lookup',
     {
       title: 'Nutrition Lookup',
-      description: "Search NutriHelp's public nutrition reference data by food name. Requires no login.",
+      description:
+        "Search NutriHelp's public nutrition reference data by food name. Requires no login.",
       inputSchema: z.object({
         query: z.string().min(2).max(50),
       }),
@@ -68,9 +80,12 @@ export function registerNutritionLookup(server: McpServer, config: NutritionLook
       });
       if (!response.ok) {
         throw new Error(`Nutrition search failed: backend returned ${String(response.status)}`);
-}
+      }
 
-      const body = (await response.json()) as { success: boolean; data?: Record<string, unknown>[] };
+      const body = (await response.json()) as {
+        success: boolean;
+        data?: Record<string, unknown>[];
+      };
       const rows = (body.data ?? []).slice(0, MAX_RESULTS);
       const output = { results: rows.map(toNutritionItem) };
 

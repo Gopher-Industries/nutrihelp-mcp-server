@@ -1,8 +1,17 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { startTestServer, callTool, closeLocalDispatcher, type TestServer } from '../../support/mcpClient.ts';
+import {
+  startTestServer,
+  callTool,
+  closeLocalDispatcher,
+  type TestServer,
+} from '../../support/mcpClient.ts';
 import { installUpstreamMock, type UpstreamMock } from '../../support/upstreamMock.ts';
 import { expectToolResult } from '../../support/assertions.ts';
-import { FOODDATA_SEARCH_PATH, IDENTITY_DENY_LIST, NUTRIHELP_API_ORIGIN } from '../../support/testEnv.ts';
+import {
+  FOODDATA_SEARCH_PATH,
+  IDENTITY_DENY_LIST,
+  NUTRIHELP_API_ORIGIN,
+} from '../../support/testEnv.ts';
 import { registerNutritionLookup } from '../../../src/tools/nutritionLookup.ts';
 
 let server: TestServer;
