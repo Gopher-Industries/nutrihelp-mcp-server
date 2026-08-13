@@ -5,7 +5,7 @@ import 'dotenv/config';
 import { McpServer } from '@modelcontextprotocol/server';
 import { loadConfig } from './config/index.ts';
 import { createHttpApp } from './transport/http.ts';
-import { registerNutritionLookup } from './tools/nutritionLookup.ts';
+import { registerTools } from './tools/registry.ts';
 
 const config = loadConfig();
 
@@ -15,8 +15,8 @@ const app = createHttpApp({
       name: 'nutrihelp-mcp-server',
       version: '1.0.0',
     });
-
-    registerNutritionLookup(server, config);
+    
+    registerTools(server, ctx, config);
 
     return server;
   },

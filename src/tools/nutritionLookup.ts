@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/server';
-import type { ServerConfig } from '../config/index.ts';
+import { fetchUpstream } from '../upstream/client.ts';
 
+interface NutritionLookupConfig {
+  readonly nutrihelpApiUrl: string;
+}
 const NUTRITION_FIELDS = [
   'category', 'name', 'calories', 'fat', 'carbohydrates', 'protein',
   'fiber', 'vitamin_a', 'vitamin_b', 'vitamin_c', 'vitamin_d', 'sodium',
@@ -44,7 +47,7 @@ function toNutritionItem(row: Record<string, unknown>): z.infer<typeof Nutrition
   return NutritionItemSchema.parse(item);
 }
 
-export function registerNutritionLookup(server: McpServer, config: ServerConfig): void {
+export function registerNutritionLookup(server: McpServer, config: NutritionLookupConfig): void {
   server.registerTool(
     'nutrition_lookup',
     {
@@ -58,13 +61,14 @@ export function registerNutritionLookup(server: McpServer, config: ServerConfig)
     async ({ query }) => {
       // Accept either `nutrihelpApiUrl` (runtime config) or `apiOrigin` (test harness).
       // Fall back to environment or localhost for extra robustness in tests.
-      const url = new URL('/api/fooddata/search', config.nutrihelpApiUrl);
-      url.searchParams.set('query', query);
-
-      const response = await fetch(url);
+      const response = await fetchUpstream({
+        baseUrl: config.nutrihelpApiUrl,
+        path: '/api/fooddata/search',
+        searchParams: { query },
+      });
       if (!response.ok) {
-        throw new Error(`Nutrition search failed: backend returned ${response.status}`);
-      }
+        throw new Error(`Nutrition search failed: backend returned ${String(response.status)}`);
+}
 
       const body = (await response.json()) as { success: boolean; data?: Record<string, unknown>[] };
       const rows = (body.data ?? []).slice(0, MAX_RESULTS);

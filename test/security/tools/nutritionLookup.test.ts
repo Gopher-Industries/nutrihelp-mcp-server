@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { startTestServer, callTool, closeLocalDispatcher, type TestServer } from '../../support/mcpClient.ts';
 import { installUpstreamMock, type UpstreamMock } from '../../support/upstreamMock.ts';
 import { expectToolResult } from '../../support/assertions.ts';
@@ -18,8 +18,6 @@ beforeEach(async () => {
 
   server = await startTestServer((mcp) => {
     registerNutritionLookup(mcp, {
-      port: 0,
-      allowedOriginHostnames: [],
       nutrihelpApiUrl: NUTRIHELP_API_ORIGIN,
     });
   });
