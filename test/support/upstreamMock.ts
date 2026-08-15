@@ -5,6 +5,11 @@
  * client would hide the deny-list, which lives inside it.
  *
  * `disableNetConnect()` is on. Call history records every dispatch, matched or not.
+ *
+ * **Keep the `undici` major equal to `process.versions.undici`.** Correctness, not hygiene: a
+ * mismatch can stop `setGlobalDispatcher` reaching `globalThis.fetch`, and the mock then goes
+ * blind while every gate stays green. `test/security/upstreamMock.test.ts` is the guard and
+ * carries the account; if it is red, nothing here is evidence about the wire.
  */
 
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher, type Dispatcher } from 'undici';
@@ -64,6 +69,9 @@ const JWKS_PATH = new URL(MCP_JWKS_URL).pathname;
 /**
  * Coercing an unrecognised body shape to `''` makes every body-side absence assertion trivially
  * true, and form-encoded introspection and exchange hit exactly that. Throw instead.
+ *
+ * The `object` branch is the sharp edge: a mismatched `undici` major delivers bodies as an
+ * `AsyncGenerator`, which serialises to `"{}"` — defined, truthy, and wrong.
  */
 function renderBody(body: unknown): string {
   if (body === undefined || body === null) return '';
