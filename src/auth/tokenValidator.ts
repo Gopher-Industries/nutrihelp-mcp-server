@@ -45,16 +45,6 @@ export function createTokenValidator(options: TokenValidatorOptions): TokenValid
   }
 
   return {
-    async validate(token: string): Promise<JWTPayload> {
-      try {
-        return await verify(token);
-      } catch (error) {
-        if (error instanceof errors.JWKSNoMatchingKey) {
-          await jwks.reload();
-          return verify(token);
-        }
-        throw error;
-      }
-    },
+    validate: verify,
   };
 }

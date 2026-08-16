@@ -1,4 +1,4 @@
-﻿import { createServer, type Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { SignJWT } from 'jose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -23,7 +23,9 @@ beforeAll(async () => {
 
   server = createServer((_request, response) => {
     jwksRequests += 1;
-    response.writeHead(200, { 'content-type': 'application/json' });
+    response.writeHead(200, {
+      'content-type': 'application/json',
+    });
     response.end(JSON.stringify(toJwks([trustedKey])));
   });
 
@@ -87,17 +89,21 @@ describe('token validator', () => {
     });
   });
 
-  it('rejects an unpublished key and refetches the JWKS', async () => {
+  it('rejects an unpublished key without bypassing the JWKS cooldown', async () => {
     await expect(validator().validate(await token({ key: foreignKey }))).rejects.toMatchObject({
       code: 'ERR_JWKS_NO_MATCHING_KEY',
     });
 
-    expect(jwksRequests).toBe(2);
+    expect(jwksRequests).toBe(1);
   });
 
   it('rejects a token from the wrong issuer', async () => {
     await expect(
-      validator().validate(await token({ iss: 'https://other-issuer.test' }))
+      validator().validate(
+        await token({
+          iss: 'https://other-issuer.test',
+        })
+      )
     ).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
     });
@@ -105,7 +111,23 @@ describe('token validator', () => {
 
   it('rejects a token for the wrong audience', async () => {
     await expect(
-      validator().validate(await token({ aud: 'https://other-service.test' }))
+      validator().validate(
+        await token({
+          aud: 'https://other-service.test',
+        })
+      )
+    ).rejects.toMatchObject({
+      code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+    });
+  });
+
+  it('rejects a token with the wrong type', async () => {
+    await expect(
+      validator().validate(
+        await token({
+          type: 'access',
+        })
+      )
     ).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
     });
