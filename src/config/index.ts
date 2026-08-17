@@ -7,6 +7,7 @@ export interface ServerConfig {
   readonly port: number;
   /** Hostnames only — the guard is port-agnostic. */
   readonly allowedOriginHostnames: readonly string[];
+  readonly nutrihelpApiUrl: string;
 }
 
 function originToHostname(origin: string): string {
@@ -29,6 +30,15 @@ function required(name: string): string {
   return value;
 }
 
+function validatedUrl(name: string, value: string): string {
+  try {
+    new URL(value);
+    return value;
+  } catch {
+    throw new Error(`${name} is not a valid URL: ${value}`);
+  }
+}
+
 export function loadConfig(): ServerConfig {
   const rawPort = required('PORT');
   const port = Number.parseInt(rawPort, 10);
@@ -49,5 +59,7 @@ export function loadConfig(): ServerConfig {
     ...new Set(allowedOrigins.map((origin) => originToHostname(origin))),
   ];
 
-  return { port, allowedOriginHostnames };
+  const nutrihelpApiUrl = validatedUrl('NUTRIHELP_API_URL', required('NUTRIHELP_API_URL'));
+
+  return { port, allowedOriginHostnames, nutrihelpApiUrl };
 }

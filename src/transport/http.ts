@@ -16,7 +16,7 @@ export function createHttpApp(options: TransportOptions): Express {
 
   const handler = createMcpHandler(options.factory, {
     // Selects 2026-07-28 exclusively; the default serves 2025-era traffic.
-    legacy: 'reject',
+    legacy: process.env.NODE_ENV === 'production' ? 'reject' : 'stateless',
     ...(options.onError === undefined ? {} : { onerror: options.onError }),
   });
 

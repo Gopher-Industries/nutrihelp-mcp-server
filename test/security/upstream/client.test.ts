@@ -34,9 +34,11 @@ import {
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   MEALPLAN_ME_PATH,
+  NUTRIHELP_API_ORIGIN,
   USER_A,
   USER_B,
 } from '../../support/testEnv.ts';
+import { registerNutritionLookup } from '../../../src/tools/nutritionLookup.ts';
 
 /** Distinctive values, so a leak is unambiguous rather than a coincidental substring. */
 const SMUGGLED_VALUE = 'SMUGGLED-USER-B-c0ffee';
@@ -95,7 +97,11 @@ beforeEach(async () => {
       ],
     },
   });
-  server = await startTestServer();
+  server = await startTestServer((mcp) => {
+    registerNutritionLookup(mcp, {
+      nutrihelpApiUrl: NUTRIHELP_API_ORIGIN,
+    });
+  });
 });
 
 afterEach(async () => {
@@ -112,7 +118,7 @@ afterAll(async () => {
  * which is where "the deny-list does not matter here" is most tempting and most wrong.
  */
 const DRIVEN_TOOLS = [
-  { tool: 'nutrition_lookup', args: { food: 'apple' }, backingPath: FOODDATA_SEARCH_PATH },
+  { tool: 'nutrition_lookup', args: { query: 'apple' }, backingPath: FOODDATA_SEARCH_PATH },
   { tool: 'get_meal_plan', args: { date: '2026-08-05' }, backingPath: MEALPLAN_ME_PATH },
 ] as const;
 
@@ -141,20 +147,18 @@ describe('a user identifier smuggled into tool arguments', () => {
       ).toContain(field);
     }
 
-    // Positive control: without it, a broken `../../../` walk makes existsSync return false and
-    // the swap guard below passes silently forever.
+    // Positive control: the static path used for the on-disk source-of-truth check must resolve.
     const knownModule = fileURLToPath(new URL('../../../src/transport/http.ts', import.meta.url));
     expect(existsSync(knownModule), 'the path walk used by the guard below must resolve').toBe(
       true
     );
 
-    // Swap guard. testEnv.ts holds a COPY; file existence is used rather than a dynamic import
-    // because the specifier cannot resolve while the file is absent (tsc TS2307).
+    // The real upstream client is the source of truth for the deny-list, so the file must exist.
     const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
     expect(
       existsSync(clientModule),
-      'src/upstream/client.ts now exists, so IDENTITY_DENY_LIST must be imported from it and the copy in testEnv.ts deleted. Until then a production list shorter than the copy passes every assertion here'
-    ).toBe(false);
+      'src/upstream/client.ts must exist and be the source of truth for IDENTITY_DENY_LIST'
+    ).toBe(true);
   });
 
   /**

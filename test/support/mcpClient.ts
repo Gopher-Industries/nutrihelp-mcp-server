@@ -52,10 +52,16 @@ export interface TestServer {
  * single place that has to learn about them. Every test below goes through here for that
  * reason.
  */
-export async function startTestServer(): Promise<TestServer> {
+export async function startTestServer(
+  configureServer?: (server: McpServer) => void
+): Promise<TestServer> {
   const errors: Error[] = [];
   const app = createHttpApp({
-    factory: () => new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' }),
+    factory: () => {
+      const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+      configureServer?.(server);
+      return server;
+    },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
     onError: (error: Error) => errors.push(error),
   });
