@@ -1,14 +1,6 @@
 /**
- * The transport-level harness. Every security test drives the real `/mcp` endpoint built by
- * `createHttpApp` and asserts on the wire response — status code, `WWW-Authenticate`, JSON-RPC
- * error shape — never on an internal type name.
- *
- * That is what makes the suite writable before the code exists: `src/errors.ts` is blocked on
- * ticket 55, and a test naming `McpError` would block this ticket behind that one.
- *
- * Requests are issued with an explicit `undici` `Agent`, so they bypass the `MockAgent`
- * installed on the global dispatcher. `test/**` carries the flat-config exemption that lets
- * this file import `undici` at all; the `fetch` guard stays on.
+ * Transport harness: real `/mcp` via `createHttpApp`, assertions on the wire.
+ * Requests use an explicit undici `Agent` so they bypass the global `MockAgent`.
  */
 
 import type { Server } from 'node:http';
@@ -20,8 +12,16 @@ import {
   CLIENT_INFO_META_KEY,
   PROTOCOL_VERSION_META_KEY,
 } from '@modelcontextprotocol/server';
-import { createHttpApp } from '../../src/transport/http.ts';
-import { ALLOWED_ORIGIN, ALLOWED_ORIGIN_HOSTNAMES } from './testEnv.ts';
+import { createHttpApp, type MissingScopeResolver } from '../../src/transport/http.ts';
+import { protectedResourceMetadataUrl } from '../../src/auth/challenge.ts';
+import { createTokenValidator, type KeySetFetch } from '../../src/auth/tokenValidator.ts';
+import {
+  ALLOWED_ORIGIN,
+  ALLOWED_ORIGIN_HOSTNAMES,
+  MCP_EXPECTED_ISSUER,
+  MCP_JWKS_URL,
+  MCP_RESOURCE_IDENTIFIER,
+} from './testEnv.ts';
 
 /** The one revision this server speaks. Selected explicitly, not negotiated. */
 export const PROTOCOL_REVISION = '2026-07-28';
@@ -43,20 +43,58 @@ export interface TestServer {
   close(): Promise<void>;
 }
 
+export interface TestServerOptions {
+  /** Only way to reach the 403 branch until a tool-to-scope map exists. */
+  readonly missingScopeFor?: MissingScopeResolver;
+  /** Fires once a request reaches the MCP handler — otherwise dispatch is invisible with no tools registered. */
+  readonly onDispatch?: () => void;
+  readonly jwksCacheMaxAgeMs?: number;
+  readonly requestDeadlineMs?: number;
+  /** Absent by default so cases go through the egress door that MockAgent intercepts. */
+  readonly keySetFetch?: KeySetFetch;
+}
+
+/** The fixture's key-set lifetime. Long enough that no case refetches unless it means to. */
+const FIXTURE_JWKS_CACHE_MAX_AGE_MS = 300_000;
+
+/** The fixture's request budget. Generous, so only a case that sets its own can reach the deadline. */
+const FIXTURE_REQUEST_DEADLINE_MS = 30_000;
+
 /**
- * Start the transport exactly as `src/server.ts` composes it.
+ * Start the transport exactly as `src/server.ts` composes it — including the authorization
+ * wiring, which is the whole point: a fixture that omits it drives an endpoint that authorizes
+ * nothing, and every rejection case below then passes or fails for the wrong reason.
  *
- * NOTE, and it is the honest limitation of writing this suite first: `createHttpApp` currently
- * takes no authorization wiring, because none exists. When tickets 21-32 land the composition
- * root gains a token validator, a revocation checker and a registry, and this factory is the
- * single place that has to learn about them. Every test below goes through here for that
- * reason.
+ * `revocation` and the registry are still absent, so the order this exercises stops at the scope
+ * check. When they land they are wired here, and every test goes through this one factory so that
+ * they cannot silently diverge from production wiring.
  */
-export async function startTestServer(): Promise<TestServer> {
+export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
   const errors: Error[] = [];
   const app = createHttpApp({
-    factory: () => new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' }),
+    factory: () => {
+      options.onDispatch?.();
+      return new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+    },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
+    authorization: {
+      // The JWKS is fetched through the global dispatcher, which `installUpstreamMock` owns, so
+      // verification keys are served in-test and never over the network.
+      validator: createTokenValidator({
+        jwksUrl: new URL(MCP_JWKS_URL),
+        expectedIssuer: MCP_EXPECTED_ISSUER,
+        expectedAudience: MCP_RESOURCE_IDENTIFIER,
+        cacheMaxAgeMs: options.jwksCacheMaxAgeMs ?? FIXTURE_JWKS_CACHE_MAX_AGE_MS,
+        requestDeadlineMs: options.requestDeadlineMs ?? FIXTURE_REQUEST_DEADLINE_MS,
+        ...(options.keySetFetch === undefined ? {} : { keySetFetch: options.keySetFetch }),
+      }),
+      // Derived, never written twice: a challenge pointer that is not byte-identical to the
+      // document's own `resource` value is discarded by a conformant client.
+      resourceMetadataUrl: protectedResourceMetadataUrl(MCP_RESOURCE_IDENTIFIER),
+      ...(options.missingScopeFor === undefined
+        ? {}
+        : { missingScopeFor: options.missingScopeFor }),
+    },
     onError: (error: Error) => errors.push(error),
   });
 
@@ -119,6 +157,22 @@ export interface McpRequestOptions {
   readonly token?: string;
   readonly origin?: string;
   readonly id?: number;
+  /**
+   * Sent as `Mcp-Method` in place of `method`, and as `Mcp-Name` in place of `name`. The routing
+   * headers are what the transport reads to select a scope requirement, and the body is what the
+   * handler compares them against — so a case about the header itself has to be able to send a
+   * value the body would never produce.
+   *
+   * `null` omits the header entirely, which is a different case from sending an empty value and is
+   * the one the protocol requires be refused.
+   */
+  readonly methodHeader?: string | null;
+  readonly nameHeader?: string | null;
+  /**
+   * Presented verbatim as `Authorization`, so a header that is present and unparseable can be
+   * distinguished from one that is absent. Wins over `token`.
+   */
+  readonly authorizationHeader?: string;
 }
 
 function joinHeader(value: string | string[] | undefined): string | undefined {
@@ -157,17 +211,33 @@ export async function mcpRequest(
   server: TestServer,
   options: McpRequestOptions
 ): Promise<McpResponse> {
-  const { method, name, params = {}, token, origin = ALLOWED_ORIGIN, id = 1 } = options;
+  const {
+    method,
+    name,
+    params = {},
+    token,
+    origin = ALLOWED_ORIGIN,
+    id = 1,
+    methodHeader,
+    nameHeader,
+    authorizationHeader,
+  } = options;
 
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
     'mcp-protocol-version': PROTOCOL_REVISION,
-    'mcp-method': method,
     origin,
   };
-  if (name !== undefined) headers['mcp-name'] = name;
-  if (token !== undefined) headers.authorization = `Bearer ${token}`;
+  // `undefined` means "mirror the body", `null` means "omit the header". Written out rather than
+  // with `??` because `??` cannot tell the two apart, and omitting a routing header is a case the
+  // protocol requires be refused.
+  const routingMethod = methodHeader === undefined ? method : methodHeader;
+  if (routingMethod !== null) headers['mcp-method'] = routingMethod;
+  const routingName = nameHeader === undefined ? name : nameHeader;
+  if (routingName !== undefined && routingName !== null) headers['mcp-name'] = routingName;
+  if (authorizationHeader !== undefined) headers.authorization = authorizationHeader;
+  else if (token !== undefined) headers.authorization = `Bearer ${token}`;
 
   const response = await request(`${server.origin}/mcp`, {
     method: 'POST',
