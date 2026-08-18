@@ -2,10 +2,16 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { SignJWT } from 'jose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createTokenValidator } from '../../../src/auth/tokenValidator.ts';
+import {
+  ACCEPTED_SIGNING_ALGORITHM,
+  createTokenValidator,
+  MCP_ACCESS_TOKEN_TYPE,
+  type TokenValidatorOptions,
+} from '../../../src/auth/tokenValidator.ts';
 import {
   createTestKeyPair,
   makeToken,
+  PLATFORM_ACCESS_TOKEN_TYPE,
   toJwks,
   type TestKeyPair,
 } from '../../../scripts/makeToken.ts';
@@ -52,11 +58,17 @@ afterAll(async () => {
   });
 });
 
-function validator() {
+const TEST_JWKS_CACHE_MAX_AGE_MS = 300_000;
+const TEST_REQUEST_DEADLINE_MS = 30_000;
+
+function validator(overrides: Partial<TokenValidatorOptions> = {}) {
   return createTokenValidator({
     jwksUrl,
     expectedIssuer: MCP_EXPECTED_ISSUER,
     expectedAudience: MCP_RESOURCE_IDENTIFIER,
+    cacheMaxAgeMs: TEST_JWKS_CACHE_MAX_AGE_MS,
+    requestDeadlineMs: TEST_REQUEST_DEADLINE_MS,
+    ...overrides,
   });
 }
 
@@ -69,6 +81,42 @@ function token(overrides: Partial<Parameters<typeof makeToken>[0]> = {}) {
     ...overrides,
   });
 }
+
+/**
+ * The pins, spelled as literals on purpose.
+ *
+ * Everything else in this file mints its tokens from the production constants, which is right — a
+ * factory that disagreed with the validator would fail every positive case for the wrong reason. But
+ * it means a change to one of these values changes what is minted *and* what is checked, so the
+ * whole suite stays green while the accepted credential profile silently moves. These are the cases
+ * whose job is to assert the value rather than to satisfy it, so they are the ones that write it out.
+ *
+ * If one of these goes red, the question is whether the change was intended and reviewed, not
+ * whether the test needs updating.
+ */
+describe('the credential profile this server accepts', () => {
+  it('accepts exactly one token type, and it is not the platform one', () => {
+    expect(
+      MCP_ACCESS_TOKEN_TYPE,
+      'the type claim is what separates an MCP access token from every other token the estate mints. Changing it is a change to what this server accepts, and it must not be possible to make it silently'
+    ).toBe('mcp_access');
+    expect(
+      PLATFORM_ACCESS_TOKEN_TYPE,
+      "and the deployed platform's own value, which the rejection cases below present and this server must refuse"
+    ).toBe('access');
+    expect(
+      MCP_ACCESS_TOKEN_TYPE,
+      'the two must stay distinct, or refusing the platform token is untestable'
+    ).not.toBe(PLATFORM_ACCESS_TOKEN_TYPE);
+  });
+
+  it('pins one asymmetric signing algorithm', () => {
+    expect(
+      ACCEPTED_SIGNING_ALGORITHM,
+      'a symmetric algorithm here would mean this server holds a signing secret and can mint what it verifies, which is the property the asymmetric choice exists to remove'
+    ).toBe('RS256');
+  });
+});
 
 describe('token validator', () => {
   it('accepts a valid token', async () => {
@@ -125,7 +173,7 @@ describe('token validator', () => {
     await expect(
       validator().validate(
         await token({
-          type: 'access',
+          type: PLATFORM_ACCESS_TOKEN_TYPE,
         })
       )
     ).rejects.toMatchObject({
