@@ -50,8 +50,8 @@ export interface MakeTokenOptions {
   readonly scopes: readonly string[];
   /** NutriHelp `users.user_id`. */
   readonly sub?: string;
-  /** Absolute epoch seconds, or a jose relative string such as `'-5m'`. Defaults to `'5m'`. */
-  readonly exp?: number | string;
+  /** Absolute epoch seconds, a jose relative string such as `'-5m'`, or `null` to omit. Defaults to `'5m'`. */
+  readonly exp?: number | string | null;
   /** Overrides the header `kid`, for the unknown-key-identifier cases. */
   readonly kid?: string;
   readonly clientId?: string;
@@ -79,7 +79,7 @@ export async function makeToken(options: MakeTokenOptions): Promise<string> {
     claims = {},
   } = options;
 
-  return new SignJWT({
+  const unsigned = new SignJWT({
     scope: scopes.join(' '),
     client_id: clientId,
     grant_id: grantId,
@@ -91,9 +91,9 @@ export async function makeToken(options: MakeTokenOptions): Promise<string> {
     .setAudience(aud)
     .setSubject(sub)
     .setJti(jti)
-    .setIssuedAt()
-    .setExpirationTime(exp)
-    .sign(key.privateKey);
+    .setIssuedAt();
+
+  return (exp === null ? unsigned : unsigned.setExpirationTime(exp)).sign(key.privateKey);
 }
 
 export interface MakePlatformTokenOptions {

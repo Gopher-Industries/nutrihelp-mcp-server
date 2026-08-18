@@ -131,6 +131,15 @@ describe('token validator', () => {
     });
   });
 
+  /** jose evaluates expiry only when the claim is present; `requiredClaims` catches the absence. */
+  it('rejects a token minted with no expiry claim', async () => {
+    await expect(validator().validate(await token({ exp: null }))).rejects.toMatchObject({
+      code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'exp',
+      reason: 'missing',
+    });
+  });
+
   it('rejects a made-up token', async () => {
     await expect(validator().validate('not-a-jwt')).rejects.toMatchObject({
       code: 'ERR_JWS_INVALID',
