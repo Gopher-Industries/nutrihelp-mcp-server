@@ -21,7 +21,29 @@ const FORWARDABLE_REQUEST_HEADERS = new Set([
   'if-none-match',
   'if-modified-since',
 ]);
+export const IDENTITY_DENY_LIST = [
+  'user_id',
+  'userId',
+  'user',
+  'email',
+  'targetUserId',
+  'targetEmail',
+  'target_user_id',
+  'target_email',
+] as const;
 
+const NORMALIZED_IDENTITY_FIELDS = new Set([
+  'user',
+  'userid',
+  'username',
+  'useremail',
+  'email',
+  'targetuser',
+  'targetuserid',
+  'targetusername',
+  'targetemail',
+  'targetuseremail',
+]);
 export interface UnauthenticatedGetOptions {
   readonly url: string | URL;
   /** Remaining request budget in ms. `undefined` means no timeout. Key is required so omission is visible. */
@@ -57,5 +79,92 @@ export async function getWithoutCredential(options: UnauthenticatedGetOptions): 
     ...(options.deadlineMs === undefined
       ? {}
       : { signal: AbortSignal.timeout(options.deadlineMs) }),
+  });
+}
+function normalizeFieldName(field: string): string {
+  return field.replaceAll(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+export function isIdentityField(field: string): boolean {
+  return NORMALIZED_IDENTITY_FIELDS.has(normalizeFieldName(field));
+}
+export interface IdentityFieldStrippedEvent {
+  readonly event: 'client_identity_field_stripped';
+  readonly field: string;
+}
+
+export type IdentityFieldLogger = (event: IdentityFieldStrippedEvent) => void;
+
+function logIdentityFieldStripped(event: IdentityFieldStrippedEvent): void {
+  console.warn(
+    JSON.stringify({
+      level: 'warn',
+      event: event.event,
+      field: event.field,
+    })
+  );
+}
+
+function toSearchValue(field: string, value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  throw new TypeError(`Declared tool parameter "${field}" must be a scalar value`);
+}
+
+export function selectDeclaredToolParameters(
+  toolArguments: Readonly<Record<string, unknown>>,
+  declaredParameters: readonly string[],
+  onIdentityFieldStripped: IdentityFieldLogger = logIdentityFieldStripped
+): Record<string, string> {
+  const declared = new Set(declaredParameters);
+  const selected: Record<string, string> = {};
+
+  for (const [field, value] of Object.entries(toolArguments)) {
+    if (isIdentityField(field)) {
+      onIdentityFieldStripped({
+        event: 'client_identity_field_stripped',
+        field,
+      });
+      continue;
+    }
+
+    if (!declared.has(field)) continue;
+
+    const searchValue = toSearchValue(field, value);
+    if (searchValue !== undefined) {
+      selected[field] = searchValue;
+    }
+  }
+
+  return selected;
+}
+export interface UpstreamRequest {
+  readonly baseUrl: string;
+  readonly path: string;
+  readonly declaredParameters: readonly string[];
+  readonly toolArguments?: Readonly<Record<string, unknown>>;
+}
+
+export async function fetchUpstream(request: UpstreamRequest): Promise<Response> {
+  const url = new URL(request.path, request.baseUrl);
+
+  const parameters = selectDeclaredToolParameters(
+    request.toolArguments ?? {},
+    request.declaredParameters
+  );
+
+  for (const [field, value] of Object.entries(parameters)) {
+    url.searchParams.set(field, value);
+  }
+
+  return getWithoutCredential({
+    url,
+    deadlineMs: undefined,
+    correlationId: undefined,
+    redirect: 'error',
   });
 }
