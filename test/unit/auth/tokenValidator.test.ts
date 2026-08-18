@@ -1,7 +1,4 @@
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { SignJWT } from 'jose';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ACCEPTED_SIGNING_ALGORITHM,
   createTokenValidator,
@@ -12,58 +9,52 @@ import {
   createTestKeyPair,
   makeToken,
   PLATFORM_ACCESS_TOKEN_TYPE,
-  toJwks,
   type TestKeyPair,
 } from '../../../scripts/makeToken.ts';
-import { ALL_SCOPES, MCP_EXPECTED_ISSUER, MCP_RESOURCE_IDENTIFIER } from '../../support/testEnv.ts';
+import { installUpstreamMock, type UpstreamMock } from '../../support/upstreamMock.ts';
+import {
+  ALL_SCOPES,
+  MCP_EXPECTED_ISSUER,
+  MCP_JWKS_URL,
+  MCP_RESOURCE_IDENTIFIER,
+} from '../../support/testEnv.ts';
 
-let trustedKey: TestKeyPair;
-let foreignKey: TestKeyPair;
-let server: Server;
-let jwksUrl: URL;
-let jwksRequests: number;
-
-beforeAll(async () => {
-  trustedKey = await createTestKeyPair('trusted-key');
-  foreignKey = await createTestKeyPair('foreign-key');
-
-  server = createServer((_request, response) => {
-    jwksRequests += 1;
-    response.writeHead(200, {
-      'content-type': 'application/json',
-    });
-    response.end(JSON.stringify(toJwks([trustedKey])));
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-
-  const address = server.address() as AddressInfo;
-  jwksUrl = new URL(`http://127.0.0.1:${String(address.port)}/jwks.json`);
-});
-
-beforeEach(() => {
-  jwksRequests = 0;
-});
-
-afterAll(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error === undefined) {
-        resolve();
-        return;
-      }
-
-      reject(error);
-    });
-  });
-});
+const JWKS_PATH = new URL(MCP_JWKS_URL).pathname;
 
 const TEST_JWKS_CACHE_MAX_AGE_MS = 300_000;
 const TEST_REQUEST_DEADLINE_MS = 30_000;
 
+/** jose's unknown-key refetch cooldown — not configured by this server. */
+const JWKS_REFETCH_COOLDOWN_MS = 30_000;
+
+let trustedKey: TestKeyPair;
+let rotatedKey: TestKeyPair;
+let foreignKey: TestKeyPair;
+let upstream: UpstreamMock;
+
+beforeAll(async () => {
+  trustedKey = await createTestKeyPair('trusted-key');
+  rotatedKey = await createTestKeyPair('rotated-key');
+  foreignKey = await createTestKeyPair('foreign-key');
+});
+
+beforeEach(() => {
+  upstream = installUpstreamMock([trustedKey]);
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+  await upstream.restore();
+});
+
+/** Key-set requests that actually left, rather than a counter the fixture increments for itself. */
+function jwksRequests(): number {
+  return upstream.callsTo(JWKS_PATH).length;
+}
+
 function validator(overrides: Partial<TokenValidatorOptions> = {}) {
   return createTokenValidator({
-    jwksUrl,
+    jwksUrl: new URL(MCP_JWKS_URL),
     expectedIssuer: MCP_EXPECTED_ISSUER,
     expectedAudience: MCP_RESOURCE_IDENTIFIER,
     cacheMaxAgeMs: TEST_JWKS_CACHE_MAX_AGE_MS,
@@ -72,6 +63,7 @@ function validator(overrides: Partial<TokenValidatorOptions> = {}) {
   });
 }
 
+/** All tokens minted through the shared factory; overrides pin the field under test. */
 function token(overrides: Partial<Parameters<typeof makeToken>[0]> = {}) {
   return makeToken({
     key: trustedKey,
@@ -81,6 +73,37 @@ function token(overrides: Partial<Parameters<typeof makeToken>[0]> = {}) {
     ...overrides,
   });
 }
+
+/** Five minutes out, in epoch seconds — the shape a raw `exp` claim actually takes. */
+const PLAUSIBLE_EXPIRY = Math.floor(Date.now() / 1000) + 300;
+
+/** One row per claim guarded by assertNoOmissionConflict; messages spelled out, not templated. */
+const OMISSION_CONFLICTS: readonly {
+  readonly claim: string;
+  readonly overrides: Partial<Parameters<typeof makeToken>[0]>;
+  readonly message: string;
+}[] = [
+  {
+    claim: 'iss',
+    overrides: { iss: null, claims: { iss: MCP_EXPECTED_ISSUER } },
+    message: 'makeToken: cannot omit iss while also supplying it through claims',
+  },
+  {
+    claim: 'aud',
+    overrides: { aud: null, claims: { aud: MCP_RESOURCE_IDENTIFIER } },
+    message: 'makeToken: cannot omit aud while also supplying it through claims',
+  },
+  {
+    claim: 'type',
+    overrides: { type: null, claims: { type: MCP_ACCESS_TOKEN_TYPE } },
+    message: 'makeToken: cannot omit type while also supplying it through claims',
+  },
+  {
+    claim: 'exp',
+    overrides: { exp: null, claims: { exp: PLAUSIBLE_EXPIRY } },
+    message: 'makeToken: cannot omit exp while also supplying it through claims',
+  },
+];
 
 /**
  * The pins, spelled as literals on purpose.
@@ -140,6 +163,17 @@ describe('token validator', () => {
     });
   });
 
+  it('guards every claim the factory guards, and the table cannot quietly shrink', () => {
+    expect(OMISSION_CONFLICTS.map((row) => row.claim)).toEqual(['iss', 'aud', 'type', 'exp']);
+  });
+
+  it.each(OMISSION_CONFLICTS)(
+    'refuses a contradictory $claim omission at mint time',
+    async ({ overrides, message }) => {
+      await expect(token(overrides)).rejects.toThrow(new Error(message));
+    }
+  );
+
   it('rejects a made-up token', async () => {
     await expect(validator().validate('not-a-jwt')).rejects.toMatchObject({
       code: 'ERR_JWS_INVALID',
@@ -151,9 +185,53 @@ describe('token validator', () => {
       code: 'ERR_JWKS_NO_MATCHING_KEY',
     });
 
-    expect(jwksRequests).toBe(1);
+    expect(
+      jwksRequests(),
+      'the initial fetch, and no second one chasing the unknown identifier: a rejected credential must not be able to buy an extra outbound request'
+    ).toBe(1);
   });
 
+  it('refetches for an unknown key identifier once the cooldown elapses, and not again inside it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+
+    // Cache lifetime refetch is not cooldown-gated; keep the advance inside the lifetime.
+    expect(TEST_JWKS_CACHE_MAX_AGE_MS).toBeGreaterThan(JWKS_REFETCH_COOLDOWN_MS + 1_000);
+
+    const check = validator();
+
+    await check.validate(await token());
+    expect(
+      jwksRequests(),
+      'the first verification populates the cache, or the rotation below has nothing to invalidate'
+    ).toBe(1);
+
+    upstream.publishKeys([trustedKey, rotatedKey]);
+
+    vi.setSystemTime(Date.now() + JWKS_REFETCH_COOLDOWN_MS + 1_000);
+
+    const payload = await check.validate(await token({ key: rotatedKey }));
+
+    expect(
+      payload.sub,
+      'the newly published key verifies, so the validator went back for the set rather than serving the identifier it had cached at startup'
+    ).toBe('user-under-test');
+    expect(
+      jwksRequests(),
+      'and it went back exactly once. A validator holding a stale set would read one here and reject a legitimately rotated key until the process restarted'
+    ).toBe(2);
+
+    // The bound, measured from the refetch that just happened rather than from startup.
+    await expect(check.validate(await token({ key: foreignKey }))).rejects.toMatchObject({
+      code: 'ERR_JWKS_NO_MATCHING_KEY',
+    });
+
+    expect(
+      jwksRequests(),
+      'a further unknown identifier inside the fresh cooldown is refused from cache. Without this, every unverifiable token an unauthenticated caller sends becomes an outbound request to the authorization server'
+    ).toBe(2);
+  });
+
+  /** Same error code for every claim rejection — assert `claim`/`reason`, not code alone. */
   it('rejects a token from the wrong issuer', async () => {
     await expect(
       validator().validate(
@@ -163,6 +241,8 @@ describe('token validator', () => {
       )
     ).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'iss',
+      reason: 'check_failed',
     });
   });
 
@@ -175,6 +255,8 @@ describe('token validator', () => {
       )
     ).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'aud',
+      reason: 'check_failed',
     });
   });
 
@@ -187,23 +269,34 @@ describe('token validator', () => {
       )
     ).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'type',
+      reason: 'mismatch',
     });
   });
 
-  it('rejects a token with a missing required field', async () => {
-    const incompleteToken = await new SignJWT({})
-      .setProtectedHeader({
-        alg: 'RS256',
-        kid: trustedKey.kid,
-      })
-      .setIssuer(MCP_EXPECTED_ISSUER)
-      .setAudience(MCP_RESOURCE_IDENTIFIER)
-      .setSubject('user-under-test')
-      .setExpirationTime('5m')
-      .sign(trustedKey.privateKey);
-
-    await expect(validator().validate(incompleteToken)).rejects.toMatchObject({
+  it('rejects a token minted with no issuer claim', async () => {
+    await expect(validator().validate(await token({ iss: null }))).rejects.toMatchObject({
       code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'iss',
+      reason: 'missing',
+    });
+  });
+
+  it('rejects a token minted with no audience claim', async () => {
+    await expect(validator().validate(await token({ aud: null }))).rejects.toMatchObject({
+      code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'aud',
+      reason: 'missing',
+    });
+  });
+
+  it('rejects a token minted with no type claim', async () => {
+    // Absent rather than wrong: a present-but-unexpected value is the type case above, and the
+    // two must not be able to stand in for each other.
+    await expect(validator().validate(await token({ type: null }))).rejects.toMatchObject({
+      code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim: 'type',
+      reason: 'missing',
     });
   });
 });
