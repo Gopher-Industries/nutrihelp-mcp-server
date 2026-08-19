@@ -1,8 +1,9 @@
 /**
  * Security suite: access after disconnection. Ticket 33 case 5.
  *
- * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and ticket 59 lands
- * `src/auth/revocation.ts`, wired ahead of scope, exchange and dispatch.
+ * WILL PASS WHEN: ticket 59 lands `src/auth/revocation.ts`, wired between offline token
+ * validation and the scope check. Tokens here are structurally valid so only the grant check
+ * can refuse them.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

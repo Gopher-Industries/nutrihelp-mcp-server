@@ -45,24 +45,38 @@ export function toJwks(keys: readonly TestKeyPair[]): { keys: JWK[] } {
 export interface MakeTokenOptions {
   /** The key that signs. A key absent from the served JWKS is how "issued by someone else" is expressed. */
   readonly key: TestKeyPair;
-  readonly iss: string;
-  readonly aud: string;
+  /** Issuer, or `null` to omit the claim. */
+  readonly iss: string | null;
+  /** Audience, or `null` to omit the claim. */
+  readonly aud: string | null;
   readonly scopes: readonly string[];
   /** NutriHelp `users.user_id`. */
   readonly sub?: string;
-  /** Absolute epoch seconds, or a jose relative string such as `'-5m'`. Defaults to `'5m'`. */
-  readonly exp?: number | string;
+  /** Absolute epoch seconds, a jose relative string such as `'-5m'`, or `null` to omit. Defaults to `'5m'`. */
+  readonly exp?: number | string | null;
   /** Overrides the header `kid`, for the unknown-key-identifier cases. */
   readonly kid?: string;
   readonly clientId?: string;
   readonly grantId?: string;
   readonly jti?: string;
-  /** The `type` claim. Defaults to `mcp_access`. */
-  readonly type?: string;
+  /** The `type` claim. Defaults to `mcp_access`; `null` omits it. */
+  readonly type?: string | null;
+  /** Raw payload claims, spread last. Must not repeat a claim named for omission via `null`. */
   readonly claims?: Readonly<Record<string, unknown>>;
 }
 
-/** Mint an MCP access token. Every negative case is one field of this object. */
+/** A `null` omission and the same key in `claims` cannot both mean something — throw instead. */
+function assertNoOmissionConflict(
+  claim: string,
+  omitted: boolean,
+  claims: Readonly<Record<string, unknown>>
+): void {
+  if (omitted && Object.hasOwn(claims, claim)) {
+    throw new Error(`makeToken: cannot omit ${claim} while also supplying it through claims`);
+  }
+}
+
+/** Mint an MCP access token. Every negative case is one field; `null` omits a claim. Extend here, not beside it. */
 export async function makeToken(options: MakeTokenOptions): Promise<string> {
   const {
     key,
@@ -79,21 +93,26 @@ export async function makeToken(options: MakeTokenOptions): Promise<string> {
     claims = {},
   } = options;
 
-  return new SignJWT({
+  assertNoOmissionConflict('iss', iss === null, claims);
+  assertNoOmissionConflict('aud', aud === null, claims);
+  assertNoOmissionConflict('type', type === null, claims);
+  assertNoOmissionConflict('exp', exp === null, claims);
+
+  // Omission branches stay in claim order so a negative token differs only by the claim left out.
+  let unsigned = new SignJWT({
     scope: scopes.join(' '),
     client_id: clientId,
     grant_id: grantId,
-    type,
+    ...(type === null ? {} : { type }),
     ...claims,
-  })
-    .setProtectedHeader({ alg: key.alg, kid })
-    .setIssuer(iss)
-    .setAudience(aud)
-    .setSubject(sub)
-    .setJti(jti)
-    .setIssuedAt()
-    .setExpirationTime(exp)
-    .sign(key.privateKey);
+  }).setProtectedHeader({ alg: key.alg, kid });
+
+  if (iss !== null) unsigned = unsigned.setIssuer(iss);
+  if (aud !== null) unsigned = unsigned.setAudience(aud);
+  unsigned = unsigned.setSubject(sub).setJti(jti).setIssuedAt();
+  if (exp !== null) unsigned = unsigned.setExpirationTime(exp);
+
+  return unsigned.sign(key.privateKey);
 }
 
 export interface MakePlatformTokenOptions {

@@ -62,9 +62,8 @@ export const CLIENT_ID = 'https://client.test/mcp-client.json';
 export const GRANT_A = 'grant-a-1111';
 
 /**
- * Copy of the production deny-list. `client.ts` exists but has no assembly path yet, so there
- * is nothing to strip. Do not move this constant into that module until query/body assembly
- * lands with it — the file-existence swap guard will stay red until then on purpose.
+ * Identity deny-list for wire-absence assertions. No counterpart exists under `src/` yet —
+ * move into `client.ts` only when ticket 28 lands query/body assembly.
  */
 export const IDENTITY_DENY_LIST = [
   'user_id',

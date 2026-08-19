@@ -5,8 +5,8 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * WILL PASS WHEN: ticket 28 lands `src/upstream/client.ts` with the frozen deny-list, and
- * tickets 26 and 32 land the two tools that drive it.
+ * WILL PASS WHEN: ticket 28 lands query/body assembly in `src/upstream/client.ts` with the
+ * frozen deny-list, and tickets 26 and 32 land the two tools that drive it.
  */
 
 import { existsSync } from 'node:fs';
@@ -148,8 +148,7 @@ describe('a user identifier smuggled into tool arguments', () => {
       true
     );
 
-    // Swap guard. testEnv.ts holds a COPY; file existence is used rather than a dynamic import
-    // because the specifier cannot resolve while the file is absent (tsc TS2307).
+    // Swap guard: file existence because a dynamic import won't resolve while the file is absent.
     const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
     expect(
       existsSync(clientModule),
