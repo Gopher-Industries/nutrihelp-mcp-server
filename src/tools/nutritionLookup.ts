@@ -49,7 +49,6 @@ const NutritionItemSchema = z.object({
 
 const CandidateSchema = z.object({ id: z.number(), name: z.string() });
 
-
 const OutputSchema = z.object({
   results: z.array(NutritionItemSchema),
   candidates: z.array(CandidateSchema).max(MAX_CANDIDATES).optional(),
@@ -75,49 +74,63 @@ interface NutritionLookupConfig {
   readonly nutrihelpApiBaseUrl: string;
 }
 
-export const handler =
-  (config: NutritionLookupConfig) => async (args: z.infer<typeof inputSchema>) => {
-    let response: Response;
-    try {
-      response = await fetchUpstream({
-        baseUrl: config.nutrihelpApiBaseUrl,
-        path: '/api/fooddata/search',
-        searchParams: { query: args.food },
-      });
-      if (!response.ok) throw new RetryableUpstreamError();
-    } catch {
-      throw new RetryableUpstreamError();
-    }
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      throw new RetryableUpstreamError();
-    }
-    const data = z
+// Extracted Helper: Fetches and parses raw upstream data safely
+async function fetchNutritionData(config: NutritionLookupConfig, food: string): Promise<Record<string, unknown>[]> {
+  try {
+    const response = await fetchUpstream({
+      baseUrl: config.nutrihelpApiBaseUrl,
+      path: '/api/fooddata/search',
+      searchParams: { query: food },
+    });
+    if (!response.ok) throw new RetryableUpstreamError();
+    
+    const body = await response.json();
+    const parsed = z
       .object({ data: z.array(z.record(z.string(), z.unknown())).default([]) })
       .safeParse(body);
-    if (!data.success) throw new RetryableUpstreamError();
+      
+    if (!parsed.success) throw new RetryableUpstreamError();
+    return parsed.data.data;
+  } catch {
+    throw new RetryableUpstreamError();
+  }
+}
 
-    const totalAvailable = data.data.data.length;
-    const selected = args.id !== undefined
-    ? data.data.data.find((row) => row.id === args.id)
-    : totalAvailable === 1 ? data.data.data[0] : undefined;
+// Extracted Helper: Builds the output schema object based on search results
+function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
+  const totalAvailable = rows.length;
+  const selected = targetId !== undefined
+    ? rows.find((row) => row.id === targetId)
+    : totalAvailable === 1 ? rows[0] : undefined;
 
-    const output = selected !== undefined
-      ? { results: [toNutritionItem(selected)], total_available: totalAvailable, truncated: false }
-      : {
-          results: [],
-          candidates: data.data.data
-            .filter((row): row is typeof row & { id: number; name: string } =>
-              typeof row.id === 'number' && typeof row.name === 'string')
-            .map((row) => ({ id: row.id, name: row.name }))
-            .slice(0, MAX_CANDIDATES),
-          total_available: totalAvailable,
-          truncated: totalAvailable > MAX_CANDIDATES,
-          truncation_note: 'Multiple matches found. Call again with the same food text and the id of the one you want.',
-        };
+  if (selected !== undefined) {
+    return { 
+      results: [toNutritionItem(selected)], 
+      total_available: totalAvailable, 
+      truncated: false 
+    };
+  }
+
+  const candidates = rows
+    .filter((row): row is typeof row & { id: number; name: string } =>
+      typeof row.id === 'number' && typeof row.name === 'string')
+    .map((row) => ({ id: row.id, name: row.name }))
+    .slice(0, MAX_CANDIDATES);
+
+  return {
+    results: [],
+    candidates,
+    total_available: totalAvailable,
+    truncated: totalAvailable > MAX_CANDIDATES,
+    truncation_note: 'Multiple matches found. Call again with the same food text and the id of the one you want.',
+  };
+}
+
+// Main tool handler function (Complexity drops from 9 to 2)
+export const handler =
+  (config: NutritionLookupConfig) => async (args: z.infer<typeof inputSchema>) => {
+    const rows = await fetchNutritionData(config, args.food);
+    const output = formatOutput(rows, args.id);
 
     if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_RESPONSE_BYTES) {
       return {
@@ -126,7 +139,7 @@ export const handler =
             type: 'text' as const,
             text: JSON.stringify({
               results: [],
-              total_available: totalAvailable,
+              total_available: rows.length,
               truncated: true,
               truncation_note: 'Response exceeded the 32 KiB limit; refine the food search.',
             }),
