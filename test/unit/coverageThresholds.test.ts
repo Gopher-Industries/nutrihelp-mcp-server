@@ -12,12 +12,12 @@
  * `vitest.config.ts`, not a source module. It sits in the unit layer because `npm test` is chained
  * into `validate`, and `test/security/**` is not. The closest precedent, the frozen egress table,
  * guards a config file from the security layer and reaches a chained gate through `test:controls` —
- * which would need a third `&&`-joined invocation to carry this file too.
+ * which would need a **fourth** `&&`-joined invocation to carry this file too.
  *
  * **The bar's value is not restated here.** It lives in `vitest.config.ts`, and a second copy is two
  * hand-maintained records of one number that drift while each reads complete on its own.
  *
- * **What this file walks.** Five ways a declared bar stops guarding, each with a case behind it.
+ * **What this file walks.** Six ways a declared bar stops guarding, each with a case behind it.
  * Every one of them ends the same way: a bar evaluating against nothing, or against the wrong files,
  * and exiting 0.
  *
@@ -31,10 +31,15 @@
  *    unconditionally.
  * 5. `coverage.include` is narrowed off a gated directory, **or deleted** — which narrows rather than
  *    widens, for the reason `isMeasured` sets out.
+ * 6. No report is written (`reportOnFailure` false): red-by-design cases fail the run first, so
+ *    routes 1–5 never evaluate.
  *
- * A sixth route, `coverage.exclude`, is **foreclosed rather than walked**: it is asserted absent,
- * because the runner matches it in a way this file deliberately does not model. See that case and
- * `selects`.
+ * A **seventh** route, `coverage.exclude`, is **foreclosed rather than walked**: it is asserted
+ * absent, because the runner matches it in a way this file deliberately does not model. See that
+ * case and `selects`.
+ *
+ * **`json-summary` is not a route** — missing it does not stop the bar firing; it only makes a
+ * 100% file look like an empty glob under the text reporter's `skipFull` default.
  *
  * **What it does not do.** Stated because the list above must not read as closed — the standing
  * lesson here is that enumerating one axis exhaustively reads exactly like enumerating every axis.
@@ -163,6 +168,9 @@ function coverageOptions(): {
   readonly include?: readonly string[];
   readonly exclude?: readonly string[];
   readonly thresholds?: unknown;
+  readonly reportOnFailure?: boolean;
+  /** Bare name, array, or `[name, options]` tuples — keep `unknown` so tuple form stays covered. */
+  readonly reporter?: unknown;
 } {
   const coverage = config.test?.coverage;
   if (coverage === undefined) {
@@ -173,6 +181,15 @@ function coverageOptions(): {
     );
   }
   return coverage;
+}
+
+/** Reporter names from bare / array / `[name, options]` shapes. */
+function declaredReporters(): readonly string[] {
+  const declared: unknown = coverageOptions().reporter;
+  const entries: readonly unknown[] = Array.isArray(declared) ? declared : [declared];
+  return entries
+    .map((entry) => (Array.isArray(entry) ? (entry as readonly unknown[])[0] : entry))
+    .filter((name): name is string => typeof name === 'string');
 }
 
 /**
@@ -339,6 +356,14 @@ describe('the coverage branch bars over the gated directories', () => {
         `the threshold covering ${dir} must carry a branch bar above zero. Absent, non-numeric or 0 is a key that evaluates and passes unconditionally; a NEGATIVE value is a maximum-uncovered count rather than a percentage floor, and this project gates a percentage, so it reads here as a policy change rather than as a bar. The value itself belongs in vitest.config.ts and is not asserted here`
       ).not.toHaveLength(0);
     }
+  });
+
+  it('writes a report even when the run fails, or the bar evaluates against nothing', () => {
+    expect(coverageOptions().reportOnFailure).toBe(true);
+  });
+
+  it('emits the one report format the doc set tells everyone to read', () => {
+    expect(declaredReporters()).toContain('json-summary');
   });
 
   /**
