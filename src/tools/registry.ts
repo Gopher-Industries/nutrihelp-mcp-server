@@ -44,4 +44,3 @@ export function registerTools(
   //   // loop and register private tools
   // }
 }
-
