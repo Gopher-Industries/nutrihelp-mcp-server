@@ -75,7 +75,10 @@ interface NutritionLookupConfig {
 }
 
 // Extracted Helper: Fetches and parses raw upstream data safely
-async function fetchNutritionData(config: NutritionLookupConfig, food: string): Promise<Record<string, unknown>[]> {
+async function fetchNutritionData(
+  config: NutritionLookupConfig,
+  food: string
+): Promise<Record<string, unknown>[]> {
   try {
     const response = await fetchUpstream({
       baseUrl: config.nutrihelpApiBaseUrl,
@@ -83,12 +86,12 @@ async function fetchNutritionData(config: NutritionLookupConfig, food: string): 
       searchParams: { query: food },
     });
     if (!response.ok) throw new RetryableUpstreamError();
-    
+
     const body = await response.json();
     const parsed = z
       .object({ data: z.array(z.record(z.string(), z.unknown())).default([]) })
       .safeParse(body);
-      
+
     if (!parsed.success) throw new RetryableUpstreamError();
     return parsed.data.data;
   } catch {
@@ -99,21 +102,26 @@ async function fetchNutritionData(config: NutritionLookupConfig, food: string): 
 // Extracted Helper: Builds the output schema object based on search results
 function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
   const totalAvailable = rows.length;
-  const selected = targetId !== undefined
-    ? rows.find((row) => row.id === targetId)
-    : totalAvailable === 1 ? rows[0] : undefined;
+  const selected =
+    targetId !== undefined
+      ? rows.find((row) => row.id === targetId)
+      : totalAvailable === 1
+        ? rows[0]
+        : undefined;
 
   if (selected !== undefined) {
-    return { 
-      results: [toNutritionItem(selected)], 
-      total_available: totalAvailable, 
-      truncated: false 
+    return {
+      results: [toNutritionItem(selected)],
+      total_available: totalAvailable,
+      truncated: false,
     };
   }
 
   const candidates = rows
-    .filter((row): row is typeof row & { id: number; name: string } =>
-      typeof row.id === 'number' && typeof row.name === 'string')
+    .filter(
+      (row): row is typeof row & { id: number; name: string } =>
+        typeof row.id === 'number' && typeof row.name === 'string'
+    )
     .map((row) => ({ id: row.id, name: row.name }))
     .slice(0, MAX_CANDIDATES);
 
@@ -122,7 +130,8 @@ function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
     candidates,
     total_available: totalAvailable,
     truncated: totalAvailable > MAX_CANDIDATES,
-    truncation_note: 'Multiple matches found. Call again with the same food text and the id of the one you want.',
+    truncation_note:
+      'Multiple matches found. Call again with the same food text and the id of the one you want.',
   };
 }
 
