@@ -10,6 +10,8 @@ export interface ServerConfig {
   readonly allowedOriginHostnames: readonly string[];
   readonly jwksUrl: URL;
   readonly expectedIssuer: string;
+  /** Authorization server issuer, published verbatim in metadata. */
+  readonly authServerUrl: string;
   /**
    * Canonical resource identifier including its path. Also the expected audience — there is no
    * second variable for it. Metadata location is derived from it too.
@@ -83,6 +85,22 @@ function requiredHttpsUrl(name: string): URL {
   return requiredHttps(name).url;
 }
 
+/** Shape refusals for values published in metadata. Shared so normalisation stays a separate choice. */
+function refuseUnpublishableShape(name: string, value: string, url: URL): void {
+  // Test the raw value: a trailing `?` or `#` parses to empty search/hash while `href` keeps it.
+  if (value.includes('?') || value.includes('#')) {
+    throw new Error(`${name} must carry no query string and no fragment`);
+  }
+  // `origin` drops userinfo, `href` keeps it. Published verbatim, this puts a credential in a
+  // document served to unauthenticated callers.
+  if (url.username !== '' || url.password !== '') {
+    throw new Error(`${name} must carry no userinfo`);
+  }
+}
+
+/** Refused in resource paths — Express re-reads these as route-pattern syntax. */
+const ROUTE_PATTERN_METACHARACTERS = /[:*(){}?+[\]]/;
+
 /**
  * Scheme-pinned and normalised — opposite of the issuer. This server publishes the canonical
  * form in its metadata, so the authorization server must echo it as `aud`.
@@ -92,15 +110,20 @@ function requiredResourceIdentifier(name: string): string {
   if (url.pathname === '/' || url.pathname === '') {
     throw new Error(`${name} must include the resource path, for example https://mcp.example/mcp`);
   }
-  // Test the raw value: a trailing `?` or `#` parses to empty search/hash while `href` keeps it.
-  if (value.includes('?') || value.includes('#')) {
-    throw new Error(`${name} must carry no query string and no fragment`);
-  }
-  // `origin` drops userinfo, `href` keeps it — audience would carry credentials the pointer does not.
-  if (url.username !== '' || url.password !== '') {
-    throw new Error(`${name} must carry no userinfo`);
+  refuseUnpublishableShape(name, value, url);
+  if (ROUTE_PATTERN_METACHARACTERS.test(url.pathname)) {
+    throw new Error(
+      `${name} path must carry no route-pattern metacharacter, because the metadata route is derived from it`
+    );
   }
   return url.href;
+}
+
+/** Scheme-pinned and verbatim, with publishability shape checks. */
+function requiredIssuerIdentifier(name: string): string {
+  const { value, url } = requiredHttps(name);
+  refuseUnpublishableShape(name, value, url);
+  return value;
 }
 
 /**
@@ -149,6 +172,7 @@ export function loadConfig(): ServerConfig {
     allowedOriginHostnames,
     jwksUrl: requiredHttpsUrl('MCP_JWKS_URL'),
     expectedIssuer: requiredHttpsVerbatim('MCP_EXPECTED_ISSUER'),
+    authServerUrl: requiredIssuerIdentifier('MCP_AUTH_SERVER_URL'),
     resourceIdentifier: requiredResourceIdentifier('MCP_RESOURCE_IDENTIFIER'),
     jwksCacheMaxAgeMs:
       requiredWholeNumber('MCP_JWKS_CACHE_TTL_S', MIN_JWKS_CACHE_TTL_S, MAX_JWKS_CACHE_TTL_S) *

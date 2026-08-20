@@ -8,7 +8,12 @@ import {
   invalidTokenChallenge,
   safeInOneLine,
   unauthenticatedChallenge,
+  protectedResourceMetadataUrl,
 } from '../auth/challenge.ts';
+import {
+  protectedResourceMetadataPaths,
+  type ProtectedResourceMetadata,
+} from '../auth/metadata.ts';
 
 /**
  * Routing headers, read before dispatch so a scope check does not consume the body.
@@ -32,7 +37,6 @@ export type MissingScopeResolver = (
 
 export interface AuthorizationOptions {
   readonly validator: TokenValidator;
-  readonly resourceMetadataUrl: string;
   readonly missingScopeFor?: MissingScopeResolver;
 }
 
@@ -64,6 +68,8 @@ export interface TransportOptions {
    * with nothing to notice it.
    */
   readonly authorization: AuthorizationOptions | UnauthenticatedTransport;
+  /** RFC 9728 document. Required; routes and challenge pointer derive from `resource`. */
+  readonly resourceMetadata: ProtectedResourceMetadata;
   /** Reporting only; never alters the response. */
   readonly onError?: (error: Error) => void;
 }
@@ -199,7 +205,7 @@ export function createHttpApp(options: TransportOptions): Express {
       if (authorizationHeader !== undefined) {
         report('unauthorized.malformed_credential');
       }
-      return { status: 401, challenge: unauthenticatedChallenge(auth.resourceMetadataUrl) };
+      return { status: 401, challenge: unauthenticatedChallenge(resourceMetadataUrl) };
     }
 
     let claims: JWTPayload;
@@ -213,7 +219,7 @@ export function createHttpApp(options: TransportOptions): Express {
         // 401 would send every client refreshing against the component that is already down.
         return { status: 503 };
       }
-      return { status: 401, challenge: invalidTokenChallenge(auth.resourceMetadataUrl) };
+      return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
     }
 
     // Live grant introspection belongs here, between validation and scope. Not built yet.
@@ -223,7 +229,7 @@ export function createHttpApp(options: TransportOptions): Express {
       report(`insufficient_scope.${safeInOneLine(missingScope)}`);
       return {
         status: 403,
-        challenge: insufficientScopeChallenge(auth.resourceMetadataUrl, missingScope),
+        challenge: insufficientScopeChallenge(resourceMetadataUrl, missingScope),
       };
     }
 
@@ -246,6 +252,15 @@ export function createHttpApp(options: TransportOptions): Express {
     }
     dispatch(req, res);
   }
+
+  // Public, unauthenticated, no Origin guard. Pointer and routes both come from `resource`.
+  const metadataPaths = protectedResourceMetadataPaths(options.resourceMetadata.resource);
+  const resourceMetadataUrl = protectedResourceMetadataUrl(options.resourceMetadata.resource);
+  function serveResourceMetadata(_req: Request, res: Response): void {
+    res.json(options.resourceMetadata);
+  }
+  app.get(metadataPaths.primary, serveResourceMetadata);
+  app.get(metadataPaths.rootProbe, serveResourceMetadata);
 
   app.all('/mcp', (req, res) => {
     if (!validateOrigin(req, res)) {

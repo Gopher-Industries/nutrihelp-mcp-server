@@ -9,6 +9,7 @@ import { loadConfig } from '../../../src/config/index.ts';
 import { protectedResourceMetadataUrl } from '../../../src/auth/challenge.ts';
 import {
   ALLOWED_ORIGIN,
+  MCP_AUTH_SERVER_URL,
   MCP_EXPECTED_ISSUER,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
@@ -21,6 +22,7 @@ const REQUIRED_VARS = [
   'MCP_ALLOWED_ORIGINS',
   'MCP_JWKS_URL',
   'MCP_EXPECTED_ISSUER',
+  'MCP_AUTH_SERVER_URL',
   'MCP_RESOURCE_IDENTIFIER',
   'MCP_JWKS_CACHE_TTL_S',
   'MCP_REQUEST_DEADLINE_MS',
@@ -34,6 +36,7 @@ const VALID: Record<RequiredVar, string> = {
   MCP_ALLOWED_ORIGINS: ALLOWED_ORIGIN,
   MCP_JWKS_URL: MCP_JWKS_URL,
   MCP_EXPECTED_ISSUER: MCP_EXPECTED_ISSUER,
+  MCP_AUTH_SERVER_URL: MCP_AUTH_SERVER_URL,
   MCP_RESOURCE_IDENTIFIER: MCP_RESOURCE_IDENTIFIER,
   MCP_JWKS_CACHE_TTL_S: '600',
   MCP_REQUEST_DEADLINE_MS: '30000',
@@ -53,9 +56,9 @@ const REFUSED_WHOLE_NUMBERS = [
   'Infinity',
 ] as const;
 
-/** The two variables read as URLs. Both go through one scheme check, so the case table asserts
- *  both rather than trusting that they share a code path. */
-const URL_VARS = ['MCP_JWKS_URL', 'MCP_RESOURCE_IDENTIFIER'] as const;
+/** The three variables read as URLs. All three go through one scheme check, so the case table
+ *  asserts each rather than trusting that they share a code path. */
+const URL_VARS = ['MCP_JWKS_URL', 'MCP_AUTH_SERVER_URL', 'MCP_RESOURCE_IDENTIFIER'] as const;
 
 /** Identifiers carrying no resource path. The pointer is published at origin + well-known + path,
  *  so a bare origin publishes it somewhere the document does not live. */
@@ -80,6 +83,28 @@ const WITH_USERINFO = [
  * keeps the character, so a check written against the parsed fields accepts a form it reads as
  * refusing — and stores the character in the audience.
  */
+const PUBLISHED_IDENTIFIER_VARS = ['MCP_RESOURCE_IDENTIFIER', 'MCP_AUTH_SERVER_URL'] as const;
+
+/**
+ * Resource paths carrying a character Express re-reads as route-pattern syntax. The metadata route
+ * is derived from this path, so `:` becomes a parameter and `*` a wildcard — the document then
+ * answers at addresses no pointer names, which is the drift the derivation exists to prevent —
+ * while `(` throws inside the router at startup naming neither the variable nor the cause.
+ */
+const ROUTE_METACHARACTER_PATHS = [
+  'https://mcp.nutrihelp.test/mcp:v1',
+  'https://mcp.nutrihelp.test/a*b',
+  'https://mcp.nutrihelp.test/mcp(1)',
+  'https://mcp.nutrihelp.test/mcp)x',
+  'https://mcp.nutrihelp.test/mcp+1',
+  'https://mcp.nutrihelp.test/mcp[1]',
+  'https://mcp.nutrihelp.test/mcp]x',
+] as const;
+
+/**
+ * `{` and `}` omitted: `new URL()` percent-encodes them in pathname, so they never reach the router as syntax.
+ */
+
 const QUERY_OR_FRAGMENT = [
   'https://mcp.nutrihelp.test/mcp?x=1',
   'https://mcp.nutrihelp.test/mcp?x',
@@ -173,6 +198,7 @@ describe('the complete valid configuration', () => {
     expect(config.allowedOriginHostnames).toEqual(['claude.ai']);
     expect(config.jwksUrl.href).toBe(MCP_JWKS_URL);
     expect(config.expectedIssuer).toBe(MCP_EXPECTED_ISSUER);
+    expect(config.authServerUrl).toBe(MCP_AUTH_SERVER_URL);
     expect(config.resourceIdentifier).toBe(MCP_RESOURCE_IDENTIFIER);
     expect(
       config.jwksCacheMaxAgeMs,
@@ -277,7 +303,7 @@ describe('a URL-valued variable over cleartext or a non-network scheme', () => {
 
   it('keeps a floor under the refused-scheme table', () => {
     expect(REFUSED_SCHEMES.length).toBeGreaterThanOrEqual(3);
-    expect(URL_VARS.length).toBe(2);
+    expect(URL_VARS.length).toBe(3);
   });
 });
 
@@ -297,17 +323,40 @@ describe('the resource identifier, which is also the expected audience', () => {
    * while the audience comparison kept it — and the bare forms are the ones a parsed test cannot
    * see, since `search` and `hash` are empty for both while `href` keeps the character.
    */
-  it.each(WITH_USERINFO)('refuses %s, which would put a credential in the audience', (value) => {
-    set('MCP_RESOURCE_IDENTIFIER', value);
+  it.each(
+    PUBLISHED_IDENTIFIER_VARS.flatMap((name) =>
+      WITH_USERINFO.map((value) => [name, value] as const)
+    )
+  )('%s refuses %s, which would publish a credential to unauthenticated callers', (name, value) => {
+    set(name, value);
 
     expect(() => loadConfig()).toThrow(/userinfo/);
   });
 
-  it.each(QUERY_OR_FRAGMENT)('refuses %s', (value) => {
-    set('MCP_RESOURCE_IDENTIFIER', value);
+  it.each(
+    PUBLISHED_IDENTIFIER_VARS.flatMap((name) =>
+      QUERY_OR_FRAGMENT.map((value) => [name, value] as const)
+    )
+  )('%s refuses %s', (name, value) => {
+    set(name, value);
 
     expect(() => loadConfig()).toThrow(/query string|fragment/);
   });
+
+  it('keeps a floor under the published-identifier pair', () => {
+    expect(PUBLISHED_IDENTIFIER_VARS.length).toBe(2);
+    expect(WITH_USERINFO.length).toBeGreaterThanOrEqual(2);
+    expect(QUERY_OR_FRAGMENT.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it.each(ROUTE_METACHARACTER_PATHS)(
+    'refuses %s, whose path Express would re-read as a route pattern',
+    (value) => {
+      set('MCP_RESOURCE_IDENTIFIER', value);
+
+      expect(() => loadConfig()).toThrow(/route-pattern metacharacter/);
+    }
+  );
 
   /**
    * The normalisation that makes the audience and the derived pointer agree. Without it an

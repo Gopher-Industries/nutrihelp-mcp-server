@@ -17,6 +17,9 @@ export const MCP_RESOURCE_IDENTIFIER = 'https://mcp.nutrihelp.test/mcp';
 export const RESOURCE_METADATA_URL =
   'https://mcp.nutrihelp.test/.well-known/oauth-protected-resource/mcp';
 
+/** Published in this server's metadata as where the connect flow starts. */
+export const MCP_AUTH_SERVER_URL = AUTH_SERVER_ORIGIN;
+
 export const MCP_JWKS_URL = `${AUTH_SERVER_ORIGIN}/.well-known/jwks.json`;
 export const INTROSPECTION_PATH = '/api/oauth/introspect';
 export const TOKEN_EXCHANGE_PATH = '/api/oauth/token';

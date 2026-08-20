@@ -16,13 +16,14 @@ import type { JWTPayload } from 'jose';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { createHttpApp, type RequestRouting } from '../../../src/transport/http.ts';
 import type { TokenValidator } from '../../../src/auth/tokenValidator.ts';
-import { protectedResourceMetadataUrl } from '../../../src/auth/challenge.ts';
+import { protectedResourceMetadata } from '../../../src/auth/metadata.ts';
 import {
   ALL_SCOPES,
   ALLOWED_ORIGIN,
   ALLOWED_ORIGIN_HOSTNAMES,
   CLIENT_ID,
   GRANT_A,
+  MCP_AUTH_SERVER_URL,
   MCP_RESOURCE_IDENTIFIER,
   RESOURCE_METADATA_URL,
   SCOPES,
@@ -118,9 +119,12 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
       return new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
+    resourceMetadata: protectedResourceMetadata({
+      resourceIdentifier: MCP_RESOURCE_IDENTIFIER,
+      authorizationServers: [MCP_AUTH_SERVER_URL],
+    }),
     authorization: {
       validator,
-      resourceMetadataUrl: protectedResourceMetadataUrl(MCP_RESOURCE_IDENTIFIER),
       missingScopeFor: (routing: RequestRouting, claims: JWTPayload): string | undefined => {
         steps.push('scope');
         scopeArgs.push({ routing, claims });

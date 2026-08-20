@@ -4,7 +4,7 @@ import 'dotenv/config';
 
 import { McpServer } from '@modelcontextprotocol/server';
 import { loadConfig } from './config/index.ts';
-import { protectedResourceMetadataUrl } from './auth/challenge.ts';
+import { protectedResourceMetadata } from './auth/metadata.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createHttpApp } from './transport/http.ts';
 
@@ -26,10 +26,13 @@ const app = createHttpApp({
       version: '1.0.0',
     }),
   allowedOriginHostnames: config.allowedOriginHostnames,
+  resourceMetadata: protectedResourceMetadata({
+    resourceIdentifier: config.resourceIdentifier,
+    authorizationServers: [config.authServerUrl],
+  }),
   authorization: {
     validator: tokenValidator,
-    resourceMetadataUrl: protectedResourceMetadataUrl(config.resourceIdentifier),
-    // Unset until the tool-to-scope map exists.
+    // Pointer derived from resourceMetadata above. missingScopeFor unset until scope map exists.
   },
   onError: (error: Error) => {
     // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.

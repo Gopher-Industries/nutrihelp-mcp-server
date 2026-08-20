@@ -13,12 +13,13 @@ import {
   PROTOCOL_VERSION_META_KEY,
 } from '@modelcontextprotocol/server';
 import { createHttpApp, type MissingScopeResolver } from '../../src/transport/http.ts';
-import { protectedResourceMetadataUrl } from '../../src/auth/challenge.ts';
+import { protectedResourceMetadata } from '../../src/auth/metadata.ts';
 import { createTokenValidator, type KeySetFetch } from '../../src/auth/tokenValidator.ts';
 import {
   ALLOWED_ORIGIN,
   ALLOWED_ORIGIN_HOSTNAMES,
   MCP_EXPECTED_ISSUER,
+  MCP_AUTH_SERVER_URL,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
 } from './testEnv.ts';
@@ -77,6 +78,11 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
       return new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
+    // Production generator, not a hand-written fixture.
+    resourceMetadata: protectedResourceMetadata({
+      resourceIdentifier: MCP_RESOURCE_IDENTIFIER,
+      authorizationServers: [MCP_AUTH_SERVER_URL],
+    }),
     authorization: {
       // The JWKS is fetched through the global dispatcher, which `installUpstreamMock` owns, so
       // verification keys are served in-test and never over the network.
@@ -88,9 +94,6 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
         requestDeadlineMs: options.requestDeadlineMs ?? FIXTURE_REQUEST_DEADLINE_MS,
         ...(options.keySetFetch === undefined ? {} : { keySetFetch: options.keySetFetch }),
       }),
-      // Derived, never written twice: a challenge pointer that is not byte-identical to the
-      // document's own `resource` value is discarded by a conformant client.
-      resourceMetadataUrl: protectedResourceMetadataUrl(MCP_RESOURCE_IDENTIFIER),
       ...(options.missingScopeFor === undefined
         ? {}
         : { missingScopeFor: options.missingScopeFor }),
