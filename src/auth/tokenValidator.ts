@@ -116,7 +116,8 @@ export function createTokenValidator(options: TokenValidatorOptions): TokenValid
       algorithms: [ACCEPTED_SIGNING_ALGORITHM],
       issuer: options.expectedIssuer,
       audience: options.expectedAudience,
-      requiredClaims: ['type'],
+      // jose only checks expiry when the claim is present; listing it here rejects tokens without one.
+      requiredClaims: ['type', 'exp'],
     });
 
     if (payload.type !== MCP_ACCESS_TOKEN_TYPE) {

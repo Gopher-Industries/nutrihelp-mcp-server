@@ -44,7 +44,24 @@ describe('the composition root', () => {
     ).toMatch(/validator:\s*tokenValidator/);
     expect(
       source,
-      'and with the challenge pointer, without which every refusal it emits is unactionable'
-    ).toMatch(/resourceMetadataUrl:\s*protectedResourceMetadataUrl\(/);
+      'and it does NOT hand the transport a separate challenge pointer. That field was removed once the transport began deriving the pointer from the document it serves — re-adding it here would make "the pointer names somewhere the router does not answer" representable again, which is the whole failure this ticket closed'
+    ).not.toMatch(/resourceMetadataUrl\s*:/);
+  });
+
+  it('publishes the document that pointer resolves to, generated rather than written out here', () => {
+    const source = sourceOf('src/server.ts');
+
+    expect(
+      source,
+      'the deployed root serves the discovery document. Without it every challenge above points at a 404 and no conformant client gets past discovery'
+    ).toMatch(/resourceMetadata:\s*protectedResourceMetadata\(/);
+    expect(
+      source,
+      'and the document is fed the same identifier the pointer is derived from, so the two cannot disagree'
+    ).toMatch(/resourceIdentifier:\s*config\.resourceIdentifier/);
+    expect(
+      source,
+      'and the authorization server comes from its own config value. A root passing a literal, or passing config.expectedIssuer by adjacency, would satisfy every other assertion here — and those two values being confusable is exactly what the open question about them is about'
+    ).toMatch(/authorizationServers:\s*\[config\.authServerUrl\]/);
   });
 });

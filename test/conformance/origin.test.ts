@@ -30,7 +30,13 @@ import {
   PROTOCOL_VERSION_META_KEY,
 } from '@modelcontextprotocol/server';
 import { createHttpApp } from '../../src/transport/http.ts';
-import { ALLOWED_ORIGIN, ALLOWED_ORIGIN_HOSTNAMES } from '../support/testEnv.ts';
+import { protectedResourceMetadata } from '../../src/auth/metadata.ts';
+import {
+  ALLOWED_ORIGIN,
+  ALLOWED_ORIGIN_HOSTNAMES,
+  MCP_AUTH_SERVER_URL,
+  MCP_RESOURCE_IDENTIFIER,
+} from '../support/testEnv.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -65,6 +71,10 @@ async function start(): Promise<Harness> {
   const app = createHttpApp({
     factory: () => new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' }),
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
+    resourceMetadata: protectedResourceMetadata({
+      resourceIdentifier: MCP_RESOURCE_IDENTIFIER,
+      authorizationServers: [MCP_AUTH_SERVER_URL],
+    }),
     // The Origin guard runs before authentication, so these cases carry no credential and an
     // authorizing endpoint would answer 401 for every one of them. The opt-out is stated rather
     // than implied: omitting the field builds an endpoint that authorizes nothing, which reads

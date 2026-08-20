@@ -10,7 +10,7 @@
  *
  * **The "no introspection request was made" assertions below are trivially true today** and cannot
  * fail: no module in the tree introspects, so the count is zero whatever the transport does. They
- * become real when ticket 25 lands `src/auth/revocation.ts` and the wiring puts a live
+ * become real when ticket 59 lands `src/auth/revocation.ts` and the wiring puts a live
  * introspection call between offline validation and the scope check — at which point "the token was
  * refused before the grant was consulted" is a property with two possible answers. Until then, read
  * a green run here as saying nothing about ordering against introspection.

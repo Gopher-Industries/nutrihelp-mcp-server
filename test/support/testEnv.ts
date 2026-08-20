@@ -17,6 +17,9 @@ export const MCP_RESOURCE_IDENTIFIER = 'https://mcp.nutrihelp.test/mcp';
 export const RESOURCE_METADATA_URL =
   'https://mcp.nutrihelp.test/.well-known/oauth-protected-resource/mcp';
 
+/** Published in this server's metadata as where the connect flow starts. */
+export const MCP_AUTH_SERVER_URL = AUTH_SERVER_ORIGIN;
+
 export const MCP_JWKS_URL = `${AUTH_SERVER_ORIGIN}/.well-known/jwks.json`;
 export const INTROSPECTION_PATH = '/api/oauth/introspect';
 export const TOKEN_EXCHANGE_PATH = '/api/oauth/token';
@@ -62,4 +65,20 @@ export const USER_B = 'user-b-0002';
 export const CLIENT_ID = 'https://client.test/mcp-client.json';
 export const GRANT_A = 'grant-a-1111';
 
+<<<<<<< HEAD
 export { IDENTITY_DENY_LIST } from '../../src/upstream/client.ts';
+=======
+/**
+ * Identity deny-list for wire-absence assertions. No counterpart exists under `src/` yet —
+ * move into `client.ts` only when ticket 28 lands query/body assembly.
+ */
+export const IDENTITY_DENY_LIST = [
+  'user_id',
+  'userId',
+  'email',
+  'targetUserId',
+  'targetEmail',
+  'target_user_id',
+  'target_email',
+] as const;
+>>>>>>> 6cf4cbb1c18ac06441eb647b5d8f882c289baa43

@@ -8,6 +8,12 @@ import { RESOURCE_METADATA_URL } from './testEnv.ts';
 import { toolResult, type McpResponse, type ToolResultView } from './mcpClient.ts';
 import type { WireCall } from './upstreamMock.ts';
 
+/** The quoted `resource_metadata` value, or undefined. Compared exactly: `toContain` over a URL is
+ *  satisfied by any string that extends it, so a pointer with a suffix appended reads as correct. */
+function pointerIn(challenge: string): string | undefined {
+  return /resource_metadata="([^"]*)"/.exec(challenge)?.[1];
+}
+
 function describeResponse(response: McpResponse): string {
   return `HTTP ${String(response.status)}, www-authenticate=${response.challenge ?? '(absent)'}, body=${response.rawBody.slice(0, 300)}`;
 }
@@ -28,9 +34,10 @@ export function expectUnauthorizedChallenge(response: McpResponse, context: stri
   expect(challenge, `${context}: the challenge carries resource_metadata`).toContain(
     'resource_metadata'
   );
-  expect(challenge, `${context}: resource_metadata must name the RFC 9728 document`).toContain(
-    RESOURCE_METADATA_URL
-  );
+  expect(
+    pointerIn(challenge),
+    `${context}: resource_metadata must name the RFC 9728 document exactly`
+  ).toBe(RESOURCE_METADATA_URL);
 }
 
 /** 403 insufficient_scope, before dispatch, carrying the required scope. */
@@ -51,6 +58,13 @@ export function expectInsufficientScopeChallenge(
   expect(challenge, `${context}: the challenge carries resource_metadata`).toContain(
     'resource_metadata'
   );
+  // This only checked the parameter NAME, so a 403 emitting an empty or wrong pointer passed. Both
+  // refusal paths take the pointer from one place, which is why the weaker assertion read as
+  // equivalent to the 401's.
+  expect(
+    pointerIn(challenge),
+    `${context}: resource_metadata must name the RFC 9728 document exactly, not merely be present`
+  ).toBe(RESOURCE_METADATA_URL);
 }
 
 /**

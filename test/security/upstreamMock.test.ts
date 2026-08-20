@@ -23,9 +23,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fetch as packagedFetch } from 'undici';
 import { createTestKeyPair, type TestKeyPair } from '../../scripts/makeToken.ts';
 import { expectWireCalls } from '../support/assertions.ts';
-import { installUpstreamMock, type UpstreamMock } from '../support/upstreamMock.ts';
+import {
+  installUpstreamMock,
+  type JwksOutcome,
+  type UpstreamMock,
+} from '../support/upstreamMock.ts';
 import {
   FOODDATA_SEARCH_PATH,
+  MCP_JWKS_URL,
   MEALPLAN_ME_PATH,
   NUTRIHELP_API_ORIGIN,
 } from '../support/testEnv.ts';
@@ -50,11 +55,18 @@ const CANNED_REPLY = { data: [{ food_name: 'Apple', energy_kj: 218 }] };
 /** Registered on no route, so it can only be answered by the mock refusing it. */
 const UNMATCHED_URL = `${NUTRIHELP_API_ORIGIN}/api/never-registered-route`;
 
+const JWKS_PATH = new URL(MCP_JWKS_URL).pathname;
+
+/** Sentinel for a `publishKeys` that returned. Mirrors the rejection sentinel below it. */
+const NO_REFUSAL = 'publishKeys returned rather than refusing';
+
 let key: TestKeyPair;
+let rotatedKey: TestKeyPair;
 let upstream: UpstreamMock;
 
 beforeAll(async () => {
   key = await createTestKeyPair('mcp-signing-key-1');
+  rotatedKey = await createTestKeyPair('mcp-signing-key-2');
 });
 
 beforeEach(() => {
@@ -112,6 +124,31 @@ async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
     'an unmatched request under disableNetConnect() must reject. A resolved response means something answered it, and the only thing that could is the network'
   ).not.toBe(NO_REJECTION);
   return outcome;
+}
+
+/** Read served key ids through runtime fetch. */
+async function servedKids(url: string): Promise<string[]> {
+  const response = await runtimeFetch(url);
+  expect(
+    response.status,
+    'the in-test JWKS route must answer, or a rotation assertion below is comparing two failures'
+  ).toBe(200);
+  const document: unknown = await response.json();
+  const entries = (document as { keys?: readonly { kid?: unknown }[] }).keys ?? [];
+  return entries.map((entry) => readString(entry.kid, 'kid-absent'));
+}
+
+/** Nested install/restore so the outer fixture survives; returns refusal message or NO_REFUSAL. */
+async function refusalMessage(keys: readonly TestKeyPair[], jwks: JwksOutcome): Promise<string> {
+  const mock = installUpstreamMock(keys, { jwks });
+  try {
+    mock.publishKeys(keys);
+    return NO_REFUSAL;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    await mock.restore();
+  }
 }
 
 describe('the shared upstream mock', () => {
@@ -210,6 +247,63 @@ describe('the shared upstream mock', () => {
       call.body,
       'the recorded body must be the exact string sent. A coerced or re-serialised body makes every absence assertion over WireCall.body meaningless'
     ).toBe(REQUEST_BODY);
+  });
+
+  /** Assert the old kid disappears after publishKeys — presence-only checks miss a frozen body. */
+  it('serves the rotated key set to a later request, and stops serving the old one', async () => {
+    expect(
+      rotatedKey.kid,
+      'the two fixtures must carry distinct identifiers, or neither assertion below can tell the sets apart'
+    ).not.toBe(key.kid);
+
+    expect(
+      await servedKids(MCP_JWKS_URL),
+      'the endpoint must serve the installed set first, or the rotation below has nothing to replace'
+    ).toEqual([key.kid]);
+
+    upstream.publishKeys([rotatedKey]);
+
+    const after = await servedKids(MCP_JWKS_URL);
+    expect(
+      after,
+      'the rotated set must be served from here on. A body built once at install time answers with the startup set forever, and every rotation test then passes against keys that never changed'
+    ).toEqual([rotatedKey.kid]);
+
+    // Counted rather than inferred: an intercept that stopped persisting would fail the second
+    // read outright, but a response served from anywhere other than this route would not.
+    expect(
+      upstream.callsTo(JWKS_PATH),
+      'both reads must have reached the mocked route, or the sets compared above came from somewhere this harness does not control'
+    ).toHaveLength(2);
+  });
+
+  /** Fixed-body and unreachable jwks outcomes must refuse with distinct messages. */
+  it('refuses to rotate a supplied jwks outcome, and says which kind it is refusing', async () => {
+    const fixedBody = await refusalMessage([key], { status: 200, body: { keys: [] } });
+    const unreachable = await refusalMessage([key], 'unreachable');
+
+    for (const [label, message] of [
+      ['a fixed-body outcome', fixedBody],
+      ['an unreachable outcome', unreachable],
+    ] as const) {
+      expect(
+        message,
+        `publishKeys must refuse ${label}: rotating one silently keeps the old set in play while the test reads as a rotation`
+      ).not.toBe(NO_REFUSAL);
+    }
+
+    expect(
+      fixedBody,
+      'the fixed-body refusal must name the body that keeps being served, which is why that rotation cannot take effect'
+    ).toContain('fixed body');
+    expect(
+      unreachable,
+      'the unreachable refusal must say that no intercept is registered. Describing a fixed-body route here explains a route the developer never registered'
+    ).toContain('No JWKS intercept is registered');
+    expect(
+      fixedBody,
+      'the two outcomes fail for different reasons, so one message serving both is the defect this case exists to catch'
+    ).not.toBe(unreachable);
   });
 
   /**

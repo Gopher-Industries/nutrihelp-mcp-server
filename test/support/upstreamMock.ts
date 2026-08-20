@@ -92,6 +92,8 @@ export interface UpstreamMock {
   introspect(payload: Record<string, unknown>, status?: number): void;
   /** RFC 8693 token-exchange reply. */
   exchange(payload: Record<string, unknown>, status?: number): void;
+  /** Replace the JWKS key set from here on; refuses when a `jwks` outcome was supplied. */
+  publishKeys(keys: readonly TestKeyPair[]): void;
   restore(): Promise<void>;
 }
 
@@ -146,14 +148,19 @@ export function installUpstreamMock(
   agent.disableNetConnect();
   setGlobalDispatcher(agent);
 
-  // JWKS, served in-test. Persisted: a validator may refetch on an unknown key identifier.
-  const jwks: JwksOutcome = options.jwks ?? { status: 200, body: toJwks(keys) };
-  if (jwks !== 'unreachable') {
+  // Default JWKS body resolves per request so publishKeys can rotate under a cached validator.
+  const fixedJwks = options.jwks;
+  let publishedKeys: readonly TestKeyPair[] = keys;
+
+  if (fixedJwks !== 'unreachable') {
+    const body: object | string | (() => object) = fixedJwks?.body ?? (() => toJwks(publishedKeys));
     const reply = agent
       .get(AUTH_SERVER_ORIGIN)
       .intercept({ path: JWKS_PATH, method: 'GET' })
-      .reply(jwks.status, jwks.body, { headers: { 'content-type': 'application/json' } });
-    if (jwks.delayMs !== undefined) reply.delay(jwks.delayMs);
+      .reply(fixedJwks?.status ?? 200, body, {
+        headers: { 'content-type': 'application/json' },
+      });
+    if (fixedJwks?.delayMs !== undefined) reply.delay(fixedJwks.delayMs);
     reply.persist();
   }
 
@@ -186,6 +193,26 @@ export function installUpstreamMock(
         status,
         body: payload,
       });
+    },
+    publishKeys(next: readonly TestKeyPair[]): void {
+      // Two refusals, not one. Conflating them hands the developer an explanation of a route that
+      // does not exist on the path where no route was ever registered.
+      if (fixedJwks === 'unreachable') {
+        throw new Error(
+          "upstreamMock: publishKeys cannot rotate an 'unreachable' `jwks` outcome. No JWKS " +
+            'intercept is registered, so every key-set request is refused before anything answers ' +
+            'it: no set is being served and there is nothing for the new keys to replace. Drop ' +
+            'the outcome to rotate against a live endpoint.'
+        );
+      }
+      if (fixedJwks !== undefined) {
+        throw new Error(
+          'upstreamMock: publishKeys cannot rotate a supplied `jwks` outcome. That route answers ' +
+            'a fixed body, so the new keys would never be served and the test would assert ' +
+            'against the old set while reading as a rotation.'
+        );
+      }
+      publishedKeys = next;
     },
     async restore(): Promise<void> {
       setGlobalDispatcher(previous);

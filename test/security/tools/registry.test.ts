@@ -1,14 +1,12 @@
 /**
  * Security suite: cross-user access through the dispatcher. Ticket 33 case 6.
  *
- * WILL PASS WHEN: ticket 27 lands the token validator, 28 the upstream client, 25 the registry
- * and 32 `get_meal_plan`. It also needs the backend's `GET /api/mealplan/me`, which is WS2's
- * work in another repository.
+ * WILL PASS WHEN: dispatch lands in `src/tools/registry.ts` (ticket 25 covers listing only),
+ * ticket 32 lands `get_meal_plan`, and ticket 28 lands the credentialed path in
+ * `src/upstream/client.ts`. Also needs the backend's `GET /api/mealplan/me` (WS2).
  *
- * This case also depends on `src/auth/revocation.ts`, the MCP-side live introspection call.
- * Ticket 59 covers it. Ticket 42 is the backend's connection-status and disconnection endpoint —
- * the status half is what this calls on every request; the disconnection half is what makes a
- * status flip.
+ * Introspection is stubbed active — ticket 59 owns it, and the revocation suite is where its
+ * absence goes red.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
