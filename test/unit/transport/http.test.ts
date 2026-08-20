@@ -12,7 +12,7 @@ import {
   CLIENT_INFO_META_KEY,
   PROTOCOL_VERSION_META_KEY,
 } from '@modelcontextprotocol/server';
-import type { JWTPayload } from 'jose';
+import { errors, type JWTPayload } from 'jose';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { createHttpApp, type RequestRouting } from '../../../src/transport/http.ts';
 import type { TokenValidator } from '../../../src/auth/tokenValidator.ts';
@@ -53,9 +53,11 @@ const ENCODED_ROUTING_VALUE = '=?utf-8?B?dG9vbHMvbGlzdA==?=';
 const localDispatcher = new Agent({ keepAliveTimeout: 10, keepAliveMaxTimeout: 10 });
 
 interface ProbeConfig {
-  /** Whether offline validation succeeds. A rejection is a plain `Error`: this file asserts
+  /** Whether offline validation succeeds. A rejection defaults to a plain `Error`: this file asserts
    *  ordering, and coupling it to a jose error class would make it a test of the code mapping. */
   readonly validator: 'accepts' | 'rejects';
+  /** Rejection cause for classifier-mapping cases. Fall-through is unreachable via real tokens. */
+  readonly validatorRejectsWith?: Error;
   /** Returned by the injected resolver. `undefined` means the granted scopes suffice. */
   readonly missingScope?: string;
   /** Throw inside the resolver, to prove an unexpected fault closes the request rather than
@@ -109,7 +111,10 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
       steps.push('validate');
       return config.validator === 'accepts'
         ? Promise.resolve(VERIFIED_CLAIMS)
-        : Promise.reject(new Error('the injected validator refuses this credential'));
+        : Promise.reject(
+            config.validatorRejectsWith ??
+              new Error('the injected validator refuses this credential')
+          );
     },
   };
 
@@ -481,5 +486,36 @@ describe('the mandatory order at the authorization boundary', () => {
 
     expect(response.rpcId, 'reached the dispatcher').toBe(1);
     expect(p.steps).toEqual(['validate', 'scope', 'dispatch']);
+  });
+});
+
+/**
+ * Fall-through is unreachable from the security suite (real tokens hit enumerated arms only).
+ * Exact equality on the report list — both codes are `unauthorized.`-prefixed, so containment
+ * would let them collapse.
+ */
+describe('the classifier fall-through', () => {
+  it('reports a failure outside every enumerated shape as unclassified', async () => {
+    const p = await start({
+      validator: 'rejects',
+      validatorRejectsWith: new RangeError('a shape the classifier has never been taught'),
+    });
+
+    const response = await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(response.status).toBe(401);
+    expect(p.reports).toEqual(['unauthorized.unclassified']);
+  });
+
+  it('reports an enumerated credential shape as token_rejected, which is a different code', async () => {
+    const p = await start({
+      validator: 'rejects',
+      validatorRejectsWith: new errors.JWTInvalid('a shape the classifier does know'),
+    });
+
+    const response = await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(response.status).toBe(401);
+    expect(p.reports).toEqual(['unauthorized.token_rejected']);
   });
 });

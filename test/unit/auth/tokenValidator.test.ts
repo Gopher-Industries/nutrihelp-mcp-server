@@ -1,7 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { errors } from 'jose';
 import {
   ACCEPTED_SIGNING_ALGORITHM,
   createTokenValidator,
+  KeySetUnavailableError,
+  type KeySetFailure,
   MCP_ACCESS_TOKEN_TYPE,
   type TokenValidatorOptions,
 } from '../../../src/auth/tokenValidator.ts';
@@ -299,4 +302,42 @@ describe('token validator', () => {
       reason: 'missing',
     });
   });
+});
+
+/**
+ * Class comment says no `cause`; nothing asserted it. Defence in depth — jose attaches payload
+ * in `validateClaimsSet`, after key resolution, so no payload-bearing error reaches this throw
+ * today. Both arms driven: a cause-forwarding refactor would most naturally hit only one.
+ */
+describe('the key-set failure carries no cause', () => {
+  const unusable = new errors.JWKSInvalid('the key set was not a key set');
+  // Second unreachable row is load-bearing: contract is "not JOSEError", not "is TypeError".
+  // TypeError alone leaves `instanceof TypeError ? unreachable : unusable` green on both rows.
+  const unreachable = new TypeError('fetch failed');
+  const alsoUnreachable = new Error('a failure that is neither a jose error nor a TypeError');
+
+  it.each([
+    ['unusable', 'a jose error', unusable],
+    ['unreachable', 'a TypeError', unreachable],
+    ['unreachable', 'neither jose nor TypeError', alsoUnreachable],
+  ] as readonly (readonly [KeySetFailure, string, Error])[])(
+    'drops the cause on the %s arm, given %s',
+    async (failure, _thrownDescription, thrown) => {
+      const validate = validator({
+        keySetFetch: () => Promise.reject(thrown),
+      });
+
+      const raised = await validate.validate(await token()).then(
+        () => undefined,
+        (error: unknown) => error
+      );
+
+      expect(raised).toBeInstanceOf(KeySetUnavailableError);
+      const keySetError = raised as KeySetUnavailableError;
+      expect(keySetError.failure).toBe(failure);
+      expect(keySetError.cause).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(keySetError, 'cause')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(keySetError, 'payload')).toBe(false);
+    }
+  );
 });
