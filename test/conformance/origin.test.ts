@@ -8,8 +8,17 @@
  *   other hostname  -> REJECT
  *
  * "Absent passes" and "`null` passes" are NOT the same relaxation, and conflating them is how a
- * browser-originated request slips through. That split is what these cases pin. Transport-level
- * throughout: the guard runs before authentication, so no case carries a token.
+ * browser-originated request slips through. That split is what these cases pin.
+ *
+ * This fixture takes the explicit no-authorization opt-out, and no case carries a token. That is
+ * forced rather than convenient: the accepted cases assert the request reaches the JSON-RPC
+ * dispatcher, and an authorizing endpoint answers 401 to a request with no credential, so every one
+ * of them would fail for a reason that has nothing to do with Origin.
+ *
+ * The consequence is that this file cannot pin the ORDER between the Origin guard and
+ * authorization. That is asserted in `test/unit/transport/http.test.ts`, which drives an authorizing
+ * endpoint with spies and shows that a disallowed origin refuses before validation, the scope check
+ * and dispatch.
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -56,6 +65,12 @@ async function start(): Promise<Harness> {
   const app = createHttpApp({
     factory: () => new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' }),
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
+    // The Origin guard runs before authentication, so these cases carry no credential and an
+    // authorizing endpoint would answer 401 for every one of them. The opt-out is stated rather
+    // than implied: omitting the field builds an endpoint that authorizes nothing, which reads
+    // identically to forgetting it, and this is the fixture whose silence made that shape
+    // survivable in the first place.
+    authorization: { unauthenticated: 'transport-tests-only' },
     onError: (error: Error) => errors.push(error),
   });
 

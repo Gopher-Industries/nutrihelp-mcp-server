@@ -5,6 +5,11 @@
  * client would hide the deny-list, which lives inside it.
  *
  * `disableNetConnect()` is on. Call history records every dispatch, matched or not.
+ *
+ * **Keep the `undici` major equal to `process.versions.undici`.** Correctness, not hygiene: a
+ * mismatch can stop `setGlobalDispatcher` reaching `globalThis.fetch`, and the mock then goes
+ * blind while every gate stays green. `test/security/upstreamMock.test.ts` is the guard and
+ * carries the account; if it is red, nothing here is evidence about the wire.
  */
 
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher, type Dispatcher } from 'undici';
@@ -45,6 +50,37 @@ export interface RouteSpec {
   readonly once?: boolean;
 }
 
+/**
+ * How the in-test JWKS endpoint answers.
+ *
+ * A key set that cannot be consulted is a different answer from a credential that failed, so the
+ * suite has to be able to produce one — and it has to come from this endpoint rather than from a
+ * faked validator, because the classification under test reads what the real library throws.
+ *
+ * `'unreachable'` registers no intercept at all: `disableNetConnect()` then refuses the request
+ * before it can leave, which is the shape a refused connection or a DNS failure arrives in.
+ *
+ * Replaces the default route rather than adding to it. undici answers from the first registered
+ * interceptor that matches and the default one is `.persist()`ed, so a second route for the same
+ * path would never be reached.
+ */
+export type JwksOutcome =
+  | {
+      readonly status: number;
+      readonly body: object | string;
+      /**
+       * Hold the reply for this long before sending it. How a deadline case gets a slow endpoint
+       * without waiting on a real one — the budget under test is milliseconds, so the delay is too.
+       */
+      readonly delayMs?: number;
+    }
+  | 'unreachable';
+
+export interface UpstreamMockOptions {
+  /** Default: 200 carrying the key set built from `keys`. */
+  readonly jwks?: JwksOutcome;
+}
+
 export interface UpstreamMock {
   /** Every request that reached the wire, in order, matched or not. */
   wireCalls(): WireCall[];
@@ -64,6 +100,9 @@ const JWKS_PATH = new URL(MCP_JWKS_URL).pathname;
 /**
  * Coercing an unrecognised body shape to `''` makes every body-side absence assertion trivially
  * true, and form-encoded introspection and exchange hit exactly that. Throw instead.
+ *
+ * The `object` branch is the sharp edge: a mismatched `undici` major delivers bodies as an
+ * `AsyncGenerator`, which serialises to `"{}"` — defined, truthy, and wrong.
  */
 function renderBody(body: unknown): string {
   if (body === undefined || body === null) return '';
@@ -98,18 +137,25 @@ function readHistory(agent: MockAgent): WireCall[] {
  * Install the mock. `keys` are published from an in-test JWKS intercept; verification keys are
  * never fetched over the network.
  */
-export function installUpstreamMock(keys: readonly TestKeyPair[]): UpstreamMock {
+export function installUpstreamMock(
+  keys: readonly TestKeyPair[],
+  options: UpstreamMockOptions = {}
+): UpstreamMock {
   const previous: Dispatcher = getGlobalDispatcher();
   const agent = new MockAgent({ enableCallHistory: true });
   agent.disableNetConnect();
   setGlobalDispatcher(agent);
 
   // JWKS, served in-test. Persisted: a validator may refetch on an unknown key identifier.
-  agent
-    .get(AUTH_SERVER_ORIGIN)
-    .intercept({ path: JWKS_PATH, method: 'GET' })
-    .reply(200, toJwks(keys), { headers: { 'content-type': 'application/json' } })
-    .persist();
+  const jwks: JwksOutcome = options.jwks ?? { status: 200, body: toJwks(keys) };
+  if (jwks !== 'unreachable') {
+    const reply = agent
+      .get(AUTH_SERVER_ORIGIN)
+      .intercept({ path: JWKS_PATH, method: 'GET' })
+      .reply(jwks.status, jwks.body, { headers: { 'content-type': 'application/json' } });
+    if (jwks.delayMs !== undefined) reply.delay(jwks.delayMs);
+    reply.persist();
+  }
 
   function route(spec: RouteSpec): void {
     const scope = agent

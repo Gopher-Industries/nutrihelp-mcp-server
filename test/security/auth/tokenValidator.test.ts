@@ -3,8 +3,17 @@
  *
  * Asserts the wire response, never an error class — `src/errors.ts` is blocked on ticket 55.
  *
- * WILL PASS WHEN: ticket 27 lands `src/auth/tokenValidator.ts` and `src/auth/challenge.ts`
- * and the composition root wires them ahead of dispatch.
+ * PASSES BECAUSE: ticket 27 landed `src/auth/tokenValidator.ts`, and ticket 65 landed
+ * `src/auth/challenge.ts` plus the wiring that puts both ahead of dispatch. The split matters
+ * when reading a failure here: a rejection that never happens is 27's module, and a rejection
+ * that happens without a challenge, or after introspection, is 65's wiring.
+ *
+ * **The "no introspection request was made" assertions below are trivially true today** and cannot
+ * fail: no module in the tree introspects, so the count is zero whatever the transport does. They
+ * become real when ticket 25 lands `src/auth/revocation.ts` and the wiring puts a live
+ * introspection call between offline validation and the scope check — at which point "the token was
+ * refused before the grant was consulted" is a property with two possible answers. Until then, read
+ * a green run here as saying nothing about ordering against introspection.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -13,6 +22,7 @@ import {
   createTestKeyPair,
   makePlatformToken,
   makeToken,
+  PLATFORM_ACCESS_TOKEN_TYPE,
   type TestKeyPair,
 } from '../../../scripts/makeToken.ts';
 import {
@@ -192,7 +202,7 @@ describe('inbound token rejection at /mcp', () => {
       aud: MCP_RESOURCE_IDENTIFIER,
       scopes: ALL_SCOPES,
       sub: USER_A,
-      type: 'access',
+      type: PLATFORM_ACCESS_TOKEN_TYPE,
     });
 
     expectUnauthorizedChallenge(

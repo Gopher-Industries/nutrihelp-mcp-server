@@ -46,10 +46,16 @@ value. Nothing security-relevant defaults.
 
 Two variables are read today, because they are the only two the transport needs:
 
-| Variable              | Required | Description                                                                      |
-| --------------------- | -------- | -------------------------------------------------------------------------------- |
-| `PORT`                | Yes      | The port to listen on. Render injects it.                                        |
-| `MCP_ALLOWED_ORIGINS` | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard. |
+| Variable                  | Required | Description                                                                      |
+| ------------------------- | -------- | -------------------------------------------------------------------------------- |
+| `PORT`                    | Yes      | The port to listen on. Render injects it.                                        |
+| `MCP_ALLOWED_ORIGINS`     | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard. |
+| `NUTRIHELP_API_BASE_URL`  | Yes      | HTTPS origin for the NutriHelp backend API.                                      |
+| `MCP_JWKS_URL`            | Yes      | HTTPS URL of the authorization server JWKS.                                      |
+| `MCP_EXPECTED_ISSUER`     | Yes      | Expected HTTPS token issuer.                                                     |
+| `MCP_RESOURCE_IDENTIFIER` | Yes      | HTTPS MCP resource identifier, including its path.                               |
+| `MCP_JWKS_CACHE_TTL_S`    | Yes      | JWKS cache lifetime in seconds, from 60 to 86400.                                |
+| `MCP_REQUEST_DEADLINE_MS` | Yes      | End-to-end MCP request deadline in milliseconds.                                 |
 
 `MCP_ALLOWED_ORIGINS` entries are parsed as URLs and reduced to hostnames; the guard is
 port-agnostic. A malformed entry fails startup rather than being skipped.

@@ -22,6 +22,7 @@ export const INTROSPECTION_PATH = '/api/oauth/introspect';
 export const TOKEN_EXCHANGE_PATH = '/api/oauth/token';
 
 export const NUTRIHELP_API_ORIGIN = 'https://api.nutrihelp.test';
+export const NUTRIHELP_API_BASE_URL = NUTRIHELP_API_ORIGIN;
 export const FOODDATA_SEARCH_PATH = '/api/fooddata/search';
 export const MEALPLAN_ME_PATH = '/api/mealplan/me';
 

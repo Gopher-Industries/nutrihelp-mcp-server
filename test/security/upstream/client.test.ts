@@ -38,7 +38,7 @@ import {
   USER_A,
   USER_B,
 } from '../../support/testEnv.ts';
-import { registerNutritionLookup } from '../../../src/tools/nutritionLookup.ts';
+import { contract, handler, inputSchema } from '../../../src/tools/nutritionLookup.ts';
 
 /** Distinctive values, so a leak is unambiguous rather than a coincidental substring. */
 const SMUGGLED_VALUE = 'SMUGGLED-USER-B-c0ffee';
@@ -98,9 +98,11 @@ beforeEach(async () => {
     },
   });
   server = await startTestServer((mcp) => {
-    registerNutritionLookup(mcp, {
-      nutrihelpApiUrl: NUTRIHELP_API_ORIGIN,
-    });
+    mcp.registerTool(
+      'nutrition_lookup',
+      { ...contract, inputSchema },
+      handler({ nutrihelpApiBaseUrl: NUTRIHELP_API_ORIGIN })
+    );
   });
 });
 
@@ -118,7 +120,7 @@ afterAll(async () => {
  * which is where "the deny-list does not matter here" is most tempting and most wrong.
  */
 const DRIVEN_TOOLS = [
-  { tool: 'nutrition_lookup', args: { query: 'apple' }, backingPath: FOODDATA_SEARCH_PATH },
+  { tool: 'nutrition_lookup', args: { food: 'apple' }, backingPath: FOODDATA_SEARCH_PATH },
   { tool: 'get_meal_plan', args: { date: '2026-08-05' }, backingPath: MEALPLAN_ME_PATH },
 ] as const;
 

@@ -1,15 +1,10 @@
 /**
- * Test-key factory: real, really-signed tokens for the test suites and the dev-token script.
- *
- * In `scripts/` because `tsconfig.build.json` excludes it, so nothing here ships in `dist/`.
- *
- * **Never hand-write a JWT string.** Keys are generated in-process and never committed.
- *
- * PLAN GAP: `type` is specified as a claim while the validator is described as pinning "typ",
- * the JOSE header. No header value is fixed, so this sets the claim only.
+ * Test-key factory. Lives in `scripts/` so it does not ship in `dist/`.
+ * Never hand-write a JWT string. Sets the `type` claim only — no JOSE header `typ` is pinned.
  */
 
 import { SignJWT, exportJWK, generateKeyPair, type JWK } from 'jose';
+import { MCP_ACCESS_TOKEN_TYPE } from '../src/auth/tokenValidator.ts';
 
 /** jose returns platform `CryptoKey`s; derive rather than import a name. */
 type GeneratedKeyPair = Awaited<ReturnType<typeof generateKeyPair>>;
@@ -17,8 +12,8 @@ type PrivateKey = GeneratedKeyPair['privateKey'];
 
 export const MCP_TOKEN_ALG = 'RS256';
 
-/** The `type` claim that marks an inbound MCP access token. */
-export const MCP_ACCESS_TOKEN_TYPE = 'mcp_access';
+/** Imported so minted tokens match the validator. The unit test spells the literal to pin the value. */
+export { MCP_ACCESS_TOKEN_TYPE };
 
 /** The `type` claim on the deployed platform HS256 token. */
 export const PLATFORM_ACCESS_TOKEN_TYPE = 'access';

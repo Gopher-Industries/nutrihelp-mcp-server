@@ -1,10 +1,7 @@
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/server';
 import { fetchUpstream } from '../upstream/client.ts';
+import { RetryableUpstreamError } from '../errors.ts';
 
-interface NutritionLookupConfig {
-  readonly nutrihelpApiUrl: string;
-}
 const NUTRITION_FIELDS = [
   'category',
   'name',
@@ -20,9 +17,17 @@ const NUTRITION_FIELDS = [
   'sodium',
   'sugar',
   'allergies_type',
+  'serving_size',
 ] as const;
+const MAX_CANDIDATES = 5;
+const MAX_RESPONSE_BYTES = 32 * 1024;
 
-const MAX_RESULTS = 10;
+export const inputSchema = z.object({
+  food: z.string().min(2).max(50),
+  id: z.number().int().positive().optional(),
+  quantity: z.number().positive().optional(),
+  unit: z.string().min(1).max(20).optional(),
+});
 
 const NutritionItemSchema = z.object({
   category: z.string().nullable(),
@@ -39,60 +44,99 @@ const NutritionItemSchema = z.object({
   sodium: z.number().nullable(),
   sugar: z.number().nullable(),
   allergies_type: z.union([z.string(), z.number()]).nullable(),
+  serving_size: z.string().nullable(),
 });
+
+const CandidateSchema = z.object({ id: z.number(), name: z.string() });
+
 
 const OutputSchema = z.object({
   results: z.array(NutritionItemSchema),
+  candidates: z.array(CandidateSchema).max(MAX_CANDIDATES).optional(),
+  total_available: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  truncation_note: z.string().optional(),
 });
 
 function toNutritionItem(row: Record<string, unknown>): z.infer<typeof NutritionItemSchema> {
-  const item = {} as Record<string, unknown>;
-  for (const field of NUTRITION_FIELDS) {
-    const value = row[field];
-    if (field === 'allergies_type' && typeof value === 'number') {
-      item[field] = value;
-    } else {
-      item[field] = value ?? null;
-    }
-  }
-  return NutritionItemSchema.parse(item);
-}
-
-export function registerNutritionLookup(server: McpServer, config: NutritionLookupConfig): void {
-  server.registerTool(
-    'nutrition_lookup',
-    {
-      title: 'Nutrition Lookup',
-      description:
-        "Search NutriHelp's public nutrition reference data by food name. Requires no login.",
-      inputSchema: z.object({
-        query: z.string().min(2).max(50),
-      }),
-      outputSchema: OutputSchema,
-    },
-    async ({ query }) => {
-      // Accept either `nutrihelpApiUrl` (runtime config) or `apiOrigin` (test harness).
-      // Fall back to environment or localhost for extra robustness in tests.
-      const response = await fetchUpstream({
-        baseUrl: config.nutrihelpApiUrl,
-        path: '/api/fooddata/search',
-        searchParams: { query },
-      });
-      if (!response.ok) {
-        throw new Error(`Nutrition search failed: backend returned ${String(response.status)}`);
-      }
-
-      const body = (await response.json()) as {
-        success: boolean;
-        data?: Record<string, unknown>[];
-      };
-      const rows = (body.data ?? []).slice(0, MAX_RESULTS);
-      const output = { results: rows.map(toNutritionItem) };
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-        structuredContent: output,
-      };
-    }
+  return NutritionItemSchema.parse(
+    Object.fromEntries(NUTRITION_FIELDS.map((field) => [field, row[field] ?? null]))
   );
 }
+
+export const contract = {
+  title: 'Nutrition Lookup',
+  description:
+    'Search NutriHelp nutrition data. Auth is not wired yet - blocked on tickets 27/59/34. This tool requires nutrition:read and live introspection like every other tool.',
+  outputSchema: OutputSchema,
+} as const;
+
+interface NutritionLookupConfig {
+  readonly nutrihelpApiBaseUrl: string;
+}
+
+export const handler =
+  (config: NutritionLookupConfig) => async (args: z.infer<typeof inputSchema>) => {
+    let response: Response;
+    try {
+      response = await fetchUpstream({
+        baseUrl: config.nutrihelpApiBaseUrl,
+        path: '/api/fooddata/search',
+        searchParams: { query: args.food },
+      });
+      if (!response.ok) throw new RetryableUpstreamError();
+    } catch {
+      throw new RetryableUpstreamError();
+    }
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new RetryableUpstreamError();
+    }
+    const data = z
+      .object({ data: z.array(z.record(z.string(), z.unknown())).default([]) })
+      .safeParse(body);
+    if (!data.success) throw new RetryableUpstreamError();
+
+    const totalAvailable = data.data.data.length;
+    const selected = args.id !== undefined
+    ? data.data.data.find((row) => row.id === args.id)
+    : totalAvailable === 1 ? data.data.data[0] : undefined;
+
+    const output = selected !== undefined
+      ? { results: [toNutritionItem(selected)], total_available: totalAvailable, truncated: false }
+      : {
+          results: [],
+          candidates: data.data.data
+            .filter((row): row is typeof row & { id: number; name: string } =>
+              typeof row.id === 'number' && typeof row.name === 'string')
+            .map((row) => ({ id: row.id, name: row.name }))
+            .slice(0, MAX_CANDIDATES),
+          total_available: totalAvailable,
+          truncated: totalAvailable > MAX_CANDIDATES,
+          truncation_note: 'Multiple matches found. Call again with the same food text and the id of the one you want.',
+        };
+
+    if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_RESPONSE_BYTES) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              results: [],
+              total_available: totalAvailable,
+              truncated: true,
+              truncation_note: 'Response exceeded the 32 KiB limit; refine the food search.',
+            }),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }],
+      structuredContent: output,
+    };
+  };

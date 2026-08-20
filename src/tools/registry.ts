@@ -6,10 +6,10 @@
  * needs no login. Auth-gated tools land here once they exist, gated on ctx.authInfo.
  */
 import type { McpServer, McpRequestContext } from '@modelcontextprotocol/server';
-import { registerNutritionLookup } from './nutritionLookup.ts';
+import { contract, handler, inputSchema } from './nutritionLookup.ts';
 
 export interface RegistryConfig {
-  readonly nutrihelpApiUrl: string;
+  readonly nutrihelpApiBaseUrl: string;
 }
 
 export function registerTools(
@@ -17,7 +17,7 @@ export function registerTools(
   ctx: McpRequestContext,
   config: RegistryConfig
 ): void {
-  registerNutritionLookup(server, config);
+  server.registerTool('nutrition_lookup', { ...contract, inputSchema }, handler(config));
 
   // Auth-gated tools land here once they exist, e.g.:
   // if (ctx.authInfo) { registerGetMealPlan(server, config); }
