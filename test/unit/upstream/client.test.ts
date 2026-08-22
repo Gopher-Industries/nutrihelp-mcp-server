@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchUpstream, IDENTITY_DENY_LIST } from '../../../src/upstream/client.ts';
+import {
+  CORRELATION_ID_HEADER,
+  fetchUpstream,
+  IDENTITY_DENY_LIST,
+  selectDeclaredToolParameters,
+} from '../../../src/upstream/client.ts';
 import { expectWireCallsSince } from '../../support/assertions.ts';
 import {
   installUpstreamMock,
@@ -39,6 +44,7 @@ afterEach(async () => {
 
 describe('Ticket 28 outbound identity boundary', () => {
   it('forwards only parameters declared by the tool definition', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
     await fetchUpstream({
       baseUrl: NUTRIHELP_API_ORIGIN,
       path: PROBE_PATH,
@@ -48,8 +54,10 @@ describe('Ticket 28 outbound identity boundary', () => {
         limit: 2,
         undeclaredSort: 'descending',
       },
+      deadlineMs: 5_000,
+      correlationId: 'declared-parameters-test',
     });
-
+    expect(timeout).toHaveBeenCalledWith(5_000);
     const calls = expectWireCallsSince(
       upstream.callsTo(PROBE_PATH),
       0,
@@ -61,6 +69,15 @@ describe('Ticket 28 outbound identity boundary', () => {
         query: 'apple',
         limit: '2',
       });
+
+      const sent = new Map(
+        Object.entries(call.headers).map(([name, value]) => [
+          name.toLowerCase(),
+          Array.isArray(value) ? value.join(', ') : value,
+        ])
+      );
+
+      expect(sent.get(CORRELATION_ID_HEADER)).toBe('declared-parameters-test');
     }
   });
 
@@ -78,6 +95,8 @@ describe('Ticket 28 outbound identity boundary', () => {
           query: 'apple',
           [field]: SMUGGLED_IDENTITY,
         },
+        deadlineMs: 5_000,
+        correlationId: 'identity-stripping-test',
       });
 
       const calls = expectWireCallsSince(
@@ -96,5 +115,67 @@ describe('Ticket 28 outbound identity boundary', () => {
 
     expect(warning).toHaveBeenCalledTimes(BLOCKED_TEST_FIELDS.length);
     expect(warning).not.toHaveBeenCalledWith(expect.stringContaining(SMUGGLED_IDENTITY));
+  });
+  it('truncates field names and caps warnings without weakening stripping', () => {
+    const longField = `u${'-'.repeat(100_000)}ser`;
+    const fields = [
+      longField,
+      ...Array.from({ length: 24 }, (_, index) => `u${'-'.repeat(index + 1)}ser`),
+    ];
+
+    const toolArguments = Object.fromEntries(fields.map((field) => [field, SMUGGLED_IDENTITY]));
+    const loggedFields: string[] = [];
+
+    const selected = selectDeclaredToolParameters(toolArguments, fields, (event) =>
+      loggedFields.push(event.field)
+    );
+
+    expect(fields).toHaveLength(25);
+    expect(selected).toEqual({});
+    expect(loggedFields).toHaveLength(20);
+    expect(loggedFields[0]).toBe(longField.slice(0, 128));
+  });
+  it('rejects a path that changes the configured origin', async () => {
+    await expect(
+      fetchUpstream({
+        baseUrl: NUTRIHELP_API_ORIGIN,
+        path: '//attacker.example/steal',
+        declaredParameters: [],
+        deadlineMs: 5_000,
+        correlationId: 'origin-test',
+      })
+    ).rejects.toThrow('Upstream path must remain on the configured origin');
+  });
+
+  it('rejects a query or fragment embedded in the path', async () => {
+    for (const path of [
+      `${PROBE_PATH}?user_id=${SMUGGLED_IDENTITY}`,
+      `${PROBE_PATH}#${SMUGGLED_IDENTITY}`,
+    ]) {
+      await expect(
+        fetchUpstream({
+          baseUrl: NUTRIHELP_API_ORIGIN,
+          path,
+          declaredParameters: [],
+          deadlineMs: 5_000,
+          correlationId: 'embedded-path-data-test',
+        })
+      ).rejects.toThrow('Upstream path must not include a query or fragment');
+    }
+  });
+
+  it('rejects a client-supplied identity interpolated into the path', async () => {
+    await expect(
+      fetchUpstream({
+        baseUrl: NUTRIHELP_API_ORIGIN,
+        path: `/api/recipe/user/${encodeURIComponent(SMUGGLED_IDENTITY)}`,
+        declaredParameters: ['user_id'],
+        toolArguments: {
+          user_id: SMUGGLED_IDENTITY,
+        },
+        deadlineMs: 5_000,
+        correlationId: 'identity-path-test',
+      })
+    ).rejects.toThrow('Client-supplied identity must not appear in the upstream path');
   });
 });

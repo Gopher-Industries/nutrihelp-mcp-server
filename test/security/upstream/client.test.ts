@@ -5,8 +5,9 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * WILL PASS WHEN: ticket 28 lands query/body assembly in `src/upstream/client.ts` with the
- * frozen deny-list, and tickets 26 and 32 land the two tools that drive it.
+ * Ticket 28 now supplies query assembly and the authoritative identity deny-list in
+ * `src/upstream/client.ts`. The wire-level case remains an executable gate for tickets
+ * 26 and 32, whose tools do not exist yet.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
