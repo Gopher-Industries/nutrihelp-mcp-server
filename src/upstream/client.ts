@@ -54,11 +54,22 @@ export interface UnauthenticatedGetOptions {
   readonly redirect: 'error' | 'follow' | 'manual';
 }
 
+/** Refuse budgets `AbortSignal.timeout` cannot honour (≤0 or non-finite). */
+function assertUsableDeadline(deadlineMs: number | undefined): void {
+  if (deadlineMs === undefined) return;
+
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new TypeError('Upstream deadline must be a positive finite number of milliseconds');
+  }
+}
+
 /**
  * GET with no credential. Headers are allowlisted, so Authorization/Cookie never reach the wire.
  * No query/body assembly, so the identity deny-list does not apply on this path.
  */
 export async function getWithoutCredential(options: UnauthenticatedGetOptions): Promise<Response> {
+  assertUsableDeadline(options.deadlineMs);
+
   const headers = new Headers();
   options.headers?.forEach((value, name) => {
     if (FORWARDABLE_REQUEST_HEADERS.has(name.toLowerCase())) {
@@ -142,6 +153,23 @@ export function selectDeclaredToolParameters(
 
   return selected;
 }
+/** Raw and decoded path segments; malformed escapes keep the raw form only. */
+function comparablePathSegments(pathname: string): string[] {
+  const comparable: string[] = [];
+
+  for (const segment of pathname.split('/')) {
+    comparable.push(segment);
+
+    try {
+      comparable.push(decodeURIComponent(segment));
+    } catch {
+      // malformed escape — raw segment above is still compared
+    }
+  }
+
+  return comparable;
+}
+
 function assertSafeUpstreamUrl(
   url: URL,
   baseUrl: URL,
@@ -155,7 +183,7 @@ function assertSafeUpstreamUrl(
     throw new TypeError('Upstream path must not include a query or fragment');
   }
 
-  const pathSegments = url.pathname.split('/').map((segment) => decodeURIComponent(segment));
+  const pathSegments = comparablePathSegments(url.pathname);
 
   for (const [field, value] of Object.entries(toolArguments)) {
     if (!isIdentityField(field)) continue;

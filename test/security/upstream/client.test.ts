@@ -116,30 +116,12 @@ const DRIVEN_TOOLS = [
 ] as const;
 
 describe('a user identifier smuggled into tool arguments', () => {
-  /** Direct deny-list check: the wire test below cannot see it because zod strips undeclared keys. */
-  it('declares every required identity field, and is not silently empty', () => {
-    const REQUIRED = [
-      'user_id',
-      'userId',
-      'user',
-      'email',
-      'targetUserId',
-      'targetEmail',
-      'target_user_id',
-      'target_email',
-    ] as const;
-
+  /** Empty deny-list would vacuously pass the wire loop below; field pin lives in test/unit. */
+  it('is not driving its wire loop over an empty deny-list', () => {
     expect(
       IDENTITY_DENY_LIST.length,
       'an empty deny-list passes every wire-absence assertion in this file'
     ).toBeGreaterThan(0);
-
-    for (const field of REQUIRED) {
-      expect(
-        IDENTITY_DENY_LIST as readonly string[],
-        `"${field}" is stripped on the way out`
-      ).toContain(field);
-    }
   });
 
   /**

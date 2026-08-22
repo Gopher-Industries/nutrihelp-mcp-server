@@ -16,6 +16,26 @@ import { NUTRIHELP_API_ORIGIN } from '../../support/testEnv.ts';
 const PROBE_PATH = '/api/ticket-28-probe';
 const SMUGGLED_IDENTITY = 'SMUGGLED-IDENTITY-c0ffee';
 
+/** Hand-written pin — must not derive from `IDENTITY_DENY_LIST`. */
+const REQUIRED_IDENTITY_FIELDS = [
+  'user_id',
+  'userId',
+  'user',
+  'username',
+  'useremail',
+  'email',
+  'identifier',
+  'targetUserId',
+  'targetEmail',
+  'target_user_id',
+  'target_email',
+  'targetuser',
+  'targetusername',
+  'targetuseremail',
+] as const;
+
+const REQUIRED_FLOOR = 14;
+
 const BLOCKED_TEST_FIELDS = [
   ...IDENTITY_DENY_LIST,
   'USER_ID',
@@ -43,6 +63,28 @@ afterEach(async () => {
 });
 
 describe('Ticket 28 outbound identity boundary', () => {
+  it('declares every required identity field, and is not silently empty', () => {
+    expect(
+      REQUIRED_IDENTITY_FIELDS.length,
+      `The required-field table has ${String(REQUIRED_IDENTITY_FIELDS.length)} entries, below ` +
+        `the floor of ${String(REQUIRED_FLOOR)}. Entries were deleted, and each one took its ` +
+        `assertion with it.`
+    ).toBeGreaterThanOrEqual(REQUIRED_FLOOR);
+
+    expect(
+      IDENTITY_DENY_LIST.length,
+      'the deny-list and the list pinning it have diverged — add the new spelling to ' +
+        'REQUIRED_IDENTITY_FIELDS, or remove it from IDENTITY_DENY_LIST'
+    ).toBe(REQUIRED_IDENTITY_FIELDS.length);
+
+    for (const field of REQUIRED_IDENTITY_FIELDS) {
+      expect(
+        IDENTITY_DENY_LIST as readonly string[],
+        `"${field}" is stripped on the way out`
+      ).toContain(field);
+    }
+  });
+
   it('forwards only parameters declared by the tool definition', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     await fetchUpstream({
@@ -177,5 +219,87 @@ describe('Ticket 28 outbound identity boundary', () => {
         correlationId: 'identity-path-test',
       })
     ).rejects.toThrow('Client-supplied identity must not appear in the upstream path');
+  });
+
+  it('rejects a percent-encoded identity in the path', async () => {
+    const encodedIdentity = 'a b/c';
+
+    await expect(
+      fetchUpstream({
+        baseUrl: NUTRIHELP_API_ORIGIN,
+        path: `/api/recipe/user/${encodeURIComponent(encodedIdentity)}`,
+        declaredParameters: [],
+        toolArguments: { user_id: encodedIdentity },
+        deadlineMs: 5_000,
+        correlationId: 'encoded-identity-path-test',
+      })
+    ).rejects.toThrow('Client-supplied identity must not appear in the upstream path');
+  });
+
+  it('decides rather than throwing URIError on a malformed percent escape', async () => {
+    const malformedPath = `${PROBE_PATH}/100%`;
+    upstream.route({ path: /^\/api\/ticket-28-probe\//, status: 200, body: { ok: true } });
+
+    const before = upstream.callsTo(malformedPath).length;
+
+    await expect(
+      fetchUpstream({
+        baseUrl: NUTRIHELP_API_ORIGIN,
+        path: malformedPath,
+        declaredParameters: ['query'],
+        toolArguments: { query: 'apple' },
+        deadlineMs: 5_000,
+        correlationId: 'malformed-escape-test',
+      })
+    ).resolves.toBeDefined();
+
+    expectWireCallsSince(
+      upstream.callsTo(malformedPath),
+      before,
+      'a path carrying a malformed escape must still reach the wire'
+    );
+  });
+
+  it('refuses a deadline AbortSignal.timeout cannot honour, before reaching the wire', async () => {
+    for (const deadlineMs of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ]) {
+      const before = upstream.callsTo(PROBE_PATH).length;
+
+      await expect(
+        fetchUpstream({
+          baseUrl: NUTRIHELP_API_ORIGIN,
+          path: PROBE_PATH,
+          declaredParameters: [],
+          deadlineMs,
+          correlationId: 'deadline-guard-test',
+        })
+      ).rejects.toThrow('Upstream deadline must be a positive finite number of milliseconds');
+
+      expect(
+        upstream.callsTo(PROBE_PATH).length,
+        `deadlineMs=${String(deadlineMs)} must be refused before anything is sent`
+      ).toBe(before);
+    }
+  });
+
+  it('still permits an explicitly absent deadline', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const before = upstream.callsTo(PROBE_PATH).length;
+
+    await fetchUpstream({
+      baseUrl: NUTRIHELP_API_ORIGIN,
+      path: PROBE_PATH,
+      declaredParameters: [],
+      deadlineMs: undefined,
+      correlationId: 'absent-deadline-test',
+    });
+
+    expectWireCallsSince(upstream.callsTo(PROBE_PATH), before, 'the request must still be sent');
+    expect(timeout).not.toHaveBeenCalled();
   });
 });
