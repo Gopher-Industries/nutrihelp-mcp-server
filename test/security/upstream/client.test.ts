@@ -5,12 +5,11 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * WILL PASS WHEN: ticket 28 lands query/body assembly in `src/upstream/client.ts` with the
- * frozen deny-list, and tickets 26 and 32 land the two tools that drive it.
+ * Ticket 28 now supplies query assembly and the authoritative identity deny-list in
+ * `src/upstream/client.ts`. The wire-level case remains an executable gate for tickets
+ * 26 and 32, whose tools do not exist yet.
  */
 
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestKeyPair, makeToken, type TestKeyPair } from '../../../scripts/makeToken.ts';
 import {
@@ -122,6 +121,7 @@ describe('a user identifier smuggled into tool arguments', () => {
     const REQUIRED = [
       'user_id',
       'userId',
+      'user',
       'email',
       'targetUserId',
       'targetEmail',
@@ -140,20 +140,6 @@ describe('a user identifier smuggled into tool arguments', () => {
         `"${field}" is stripped on the way out`
       ).toContain(field);
     }
-
-    // Positive control: without it, a broken `../../../` walk makes existsSync return false and
-    // the swap guard below passes silently forever.
-    const knownModule = fileURLToPath(new URL('../../../src/transport/http.ts', import.meta.url));
-    expect(existsSync(knownModule), 'the path walk used by the guard below must resolve').toBe(
-      true
-    );
-
-    // Swap guard: file existence because a dynamic import won't resolve while the file is absent.
-    const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
-    expect(
-      existsSync(clientModule),
-      'src/upstream/client.ts now exists, so IDENTITY_DENY_LIST must be imported from it and the copy in testEnv.ts deleted. Until then a production list shorter than the copy passes every assertion here'
-    ).toBe(false);
   });
 
   /**

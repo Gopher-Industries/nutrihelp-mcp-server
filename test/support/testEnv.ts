@@ -64,16 +64,5 @@ export const USER_B = 'user-b-0002';
 export const CLIENT_ID = 'https://client.test/mcp-client.json';
 export const GRANT_A = 'grant-a-1111';
 
-/**
- * Identity deny-list for wire-absence assertions. No counterpart exists under `src/` yet —
- * move into `client.ts` only when ticket 28 lands query/body assembly.
- */
-export const IDENTITY_DENY_LIST = [
-  'user_id',
-  'userId',
-  'email',
-  'targetUserId',
-  'targetEmail',
-  'target_user_id',
-  'target_email',
-] as const;
+/** Production source of truth for blocked identity fields. */
+export { IDENTITY_DENY_LIST } from '../../src/upstream/client.ts';
