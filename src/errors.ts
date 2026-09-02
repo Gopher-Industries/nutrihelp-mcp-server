@@ -133,6 +133,8 @@ export type McpErrorModelPayload =
     }
   | {
       readonly class: 'confirmation_required';
+      /** Pending-action discriminant; same string as class, different field. */
+      readonly status: 'confirmation_required';
       readonly message: string;
       readonly summary: string;
       readonly confirmation_token: string;
@@ -181,6 +183,13 @@ function renderUnresolvedItems(items: readonly string[] | undefined): {
   return items === undefined || items.length === 0 ? {} : { unresolved_items: [...items] };
 }
 
+/** Exhaustive-switch refusal: throw; interpolate class only. */
+function refuseUndeclaredClass(unreachable: never): never {
+  throw new TypeError(
+    `McpError: undeclared error class ${String((unreachable as { class?: unknown }).class)}`
+  );
+}
+
 /** Copy declared fields only. A sixth class or a cast-in extra throws rather than leaking later. */
 function declaredFieldsOnly(init: McpErrorInit): McpErrorInit {
   switch (init.class) {
@@ -219,10 +228,8 @@ function declaredFieldsOnly(init: McpErrorInit): McpErrorInit {
         confirmation_token: init.confirmation_token,
         ...renderUnresolvedItems(init.unresolved_items),
       };
-    default: {
-      const unreachable: never = init;
-      throw new TypeError(`McpError: undeclared error class ${String(unreachable)}`);
-    }
+    default:
+      return refuseUndeclaredClass(init);
   }
 }
 
@@ -280,15 +287,14 @@ export class McpError extends Error {
       case 'confirmation_required':
         return {
           class: 'confirmation_required',
+          status: 'confirmation_required',
           message: MODEL_MESSAGES.confirmation_required,
           summary: init.summary,
           confirmation_token: init.confirmation_token,
           ...renderUnresolvedItems(init.unresolved_items),
         };
-      default: {
-        const unreachable: never = init;
-        return unreachable;
-      }
+      default:
+        return refuseUndeclaredClass(init);
     }
   }
 
@@ -329,10 +335,8 @@ export class McpError extends Error {
           summary: init.summary,
           confirmation_token: init.confirmation_token,
         };
-      default: {
-        const unreachable: never = init;
-        return unreachable;
-      }
+      default:
+        return refuseUndeclaredClass(init);
     }
   }
 }

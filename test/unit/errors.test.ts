@@ -73,6 +73,8 @@ const FORBIDDEN_EXTRAS: Record<string, unknown> = {
   details: FORBIDDEN.responseBody,
 };
 
+const EXPECTED_FORBIDDEN_EXTRA_COUNT = 8;
+
 /* Construction surface — proposed, not pinned. Change these builders if the signature changes. */
 
 type ErrorInit = ConstructorParameters<typeof McpError>[0];
@@ -244,6 +246,25 @@ function deepStrings(value: unknown, seen = new WeakSet<object>()): string[] {
       out.push(...deepStrings(record[key], seen));
     } catch {
       out.push('<unreadable>');
+    }
+  }
+  return out;
+}
+
+/** Numeric twin of `deepStrings`; numeric strings excluded. */
+function deepNumbers(value: unknown, seen = new WeakSet<object>()): number[] {
+  if (typeof value === 'number') return [value];
+  if (value === null || typeof value !== 'object') return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const out: number[] = [];
+  const record = value as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(value)) {
+    try {
+      out.push(...deepNumbers(record[key], seen));
+    } catch {
+      continue;
     }
   }
   return out;
@@ -560,9 +581,10 @@ describe('the error instance itself', () => {
     );
     expect(
       Object.keys(FORBIDDEN_EXTRAS).length,
-      'control: the forbidden-extras construction supplies something, or half this table is a ' +
-        'duplicate of the other half'
-    ).toBeGreaterThan(0);
+      'keys were deleted from the injection set. The count defends the key surface rather than ' +
+        'the values, since seven of the eight share a value with a sibling — and the key-based ' +
+        'status cases below have nothing left to displace once their key is gone'
+    ).toBe(EXPECTED_FORBIDDEN_EXTRA_COUNT);
   });
 
   it.each(INSTANCE_CASES)(
@@ -705,6 +727,118 @@ describe('the error instance itself', () => {
       }
     }
   );
+});
+
+/* Refusal: construction must throw; returning never leaks the raw init. */
+
+const UNDECLARED_CLASS = 'sixth';
+
+function constructUndeclared(): McpError {
+  return construct({ class: UNDECLARED_CLASS, ...FORBIDDEN_EXTRAS }, {});
+}
+
+function captureThrow(build: () => McpError): { thrown: unknown; produced: unknown } {
+  const NOTHING = Symbol('nothing was thrown');
+  let thrown: unknown = NOTHING;
+  let produced: unknown = NOTHING;
+  try {
+    produced = build();
+  } catch (error) {
+    thrown = error;
+  }
+  return { thrown: thrown === NOTHING ? undefined : thrown, produced };
+}
+
+describe('an undeclared class', () => {
+  it('is genuinely undeclared, and is handed material worth refusing', () => {
+    expect(
+      (EXPECTED_CLASSES as readonly string[]).includes(UNDECLARED_CLASS),
+      'control: the probe name became a declared class, so these cases now assert that a ' +
+        'legitimate class is refused rather than that an undeclared one is'
+    ).toBe(false);
+    expect(
+      (MCP_ERROR_CLASSES as readonly string[]).includes(UNDECLARED_CLASS),
+      'control: the module declares the probe name, so constructing it is no longer a refusal'
+    ).toBe(false);
+    expect(
+      Object.keys(FORBIDDEN_EXTRAS).length,
+      'control: the refusal is only worth asserting because the init carries material that must ' +
+        'not survive it'
+    ).toBe(EXPECTED_FORBIDDEN_EXTRA_COUNT);
+  });
+
+  it('is refused at construction with a TypeError', () => {
+    expect(
+      () => constructUndeclared(),
+      'the exhaustiveness default has to throw. Returning its `never` binding puts the raw init ' +
+        'into the error, and both payload builders then return it — the two headline guarantees ' +
+        'defeated by one cast'
+    ).toThrow(TypeError);
+  });
+
+  it('produces no McpError at all, rather than a half-built one', () => {
+    const { thrown, produced } = captureThrow(constructUndeclared);
+
+    expect(
+      thrown,
+      'control: construction returned instead of throwing, so there is no refusal to assert about'
+    ).toBeInstanceOf(TypeError);
+    expect(
+      produced,
+      'a refused init must yield no error object. One that exists can be caught, logged and ' +
+        'serialised, and it was never filtered through the declared-field copy'
+    ).not.toBeInstanceOf(McpError);
+    expect(produced, 'a refused init must yield no Error of any kind').not.toBeInstanceOf(Error);
+  });
+
+  it('names the discriminant in the refusal and nothing else it was handed', () => {
+    const { thrown } = captureThrow(constructUndeclared);
+
+    expect(thrown, 'control: nothing was thrown, so there is no message to read').toBeInstanceOf(
+      TypeError
+    );
+    const message = (thrown as Error).message;
+
+    expect(
+      message.length,
+      'control: an empty message passes every absence check below without meaning anything'
+    ).toBeGreaterThan(0);
+    expect(
+      message.includes(UNDECLARED_CLASS),
+      'control: the refusal names the class it refused, so the absence checks below are over a ' +
+        'message that did interpolate something'
+    ).toBe(true);
+
+    // The message only, not the stack: a V8 stack carries line and column numbers, and a numeric
+    // sentinel would false-red against one.
+    for (const value of ALL_FORBIDDEN_VALUES) {
+      expect(
+        message.includes(String(value)),
+        'the refusal interpolates the discriminant alone. A message built from the whole init ' +
+          'carries undeclared material into every log that records a construction failure'
+      ).toBe(false);
+    }
+  });
+
+  it('attaches nothing it was handed to the thrown error, at any depth', () => {
+    const { thrown } = captureThrow(constructUndeclared);
+
+    expect(thrown, 'control: nothing was thrown').toBeInstanceOf(TypeError);
+    expect(
+      deepStrings(thrown).length,
+      'control: the thrown error walked to nothing, so every absence check below holds over an ' +
+        'empty walk rather than over the error'
+    ).toBeGreaterThan(0);
+
+    // String values only, for the same stack-numbering reason as above.
+    for (const value of STRING_FORBIDDEN_VALUES) {
+      expect(
+        textIncludes(thrown, value),
+        'the refused init reached the thrown error, so a `cause` or a copied property carried ' +
+          'undeclared material past the refusal that was supposed to stop it'
+      ).toBe(false);
+    }
+  });
 });
 
 describe('unauthorized', () => {
@@ -855,6 +989,9 @@ describe('upstream_failure', () => {
   });
 });
 
+/** Hand-written pending-action status literal. */
+const PENDING_ACTION_STATUS = 'confirmation_required';
+
 describe('confirmation_required', () => {
   it('returns a structured pending action to the model', () => {
     const model: unknown = aConfirmationRequired().toModel();
@@ -876,9 +1013,11 @@ describe('confirmation_required', () => {
     const model: unknown = aConfirmationRequired().toModel();
 
     expect(
-      textIncludes(model, 'SUMMARY-SENTINEL-8b02'),
-      'the summary shown to the user is generated server-side, so it has to reach the model'
-    ).toBe(true);
+      valuesAtKey('summary', model),
+      'the summary is generated server-side under this field name. A substring check anywhere ' +
+        'in the payload stays green with the text folded into the generic message, where no ' +
+        'client reading summary would ever find it'
+    ).toEqual([SENTINEL.summary]);
   });
 
   it('lists every unresolved item to the model when the write did not fully resolve', () => {
@@ -893,9 +1032,11 @@ describe('confirmation_required', () => {
       ).toBe(true);
     }
     expect(
-      valuesAtKey('unresolved_items', model).length,
-      'the list has to arrive under its own field name, not folded into the prose summary'
-    ).toBeGreaterThan(0);
+      valuesAtKey('unresolved_items', model),
+      'the list has to arrive under its own field name carrying exactly these items. A length ' +
+        'floor passes on an empty array -- valuesAtKey returns the property values, so [] is ' +
+        'one value -- which is the silent partial meal this case exists to catch'
+    ).toEqual([[...SENTINEL.unresolvedItems]]);
   });
 
   it('omits the unresolved-items field entirely when every item resolved', () => {
@@ -927,11 +1068,58 @@ describe('confirmation_required', () => {
 
     expect(carriesExactly(log, SENTINEL.confirmationToken)).toBe(true);
   });
+
+  it('hands the model the pending-action status under its own field name', () => {
+    const model: unknown = aConfirmationRequired().toModel();
+
+    expectNonEmptyPayload(model, 'confirmation_required toModel()');
+    expect(
+      valuesAtKey('status', model),
+      'a pending action reaches the model as a tool result, and its envelope names the state as ' +
+        'status. The class discriminant carries the same string, so it is not that field'
+    ).toContain(PENDING_ACTION_STATUS);
+  });
+
+  it('keeps the pending-action status off the log payload', () => {
+    const log: unknown = aConfirmationRequired().toLog();
+
+    expect(
+      carriesExactly(log, SENTINEL.confirmationToken),
+      'control: the rest of the pending action is still on the log side, so the absence below is ' +
+        'an exclusion rather than an empty payload'
+    ).toBe(true);
+    expect(
+      hasKeyAnywhere('status', log),
+      'status is the model-facing envelope field. The log column already names the state in the ' +
+        'class discriminant, and a second spelling is one more thing to keep in step'
+    ).toBe(false);
+  });
+
+  it('does not let an injected status displace the one the taxonomy states', () => {
+    const error = aConfirmationRequired(FORBIDDEN_EXTRAS);
+    const model: unknown = error.toModel();
+    const log: unknown = error.toLog();
+
+    expectNoForbiddenMaterial(model, 'confirmation_required toModel()');
+    expectNoForbiddenMaterial(log, 'confirmation_required toLog()');
+
+    expect(
+      valuesAtKey('status', model),
+      'the status the model reads is the taxonomy own literal. A caller-supplied one must not ' +
+        'reach that key at all, and a declared field is exactly where a spread init hides'
+    ).toEqual([PENDING_ACTION_STATUS]);
+    expect(
+      hasKeyAnywhere('status', log),
+      'an injected status reached the log payload through a field the taxonomy does declare on ' +
+        'the other side'
+    ).toBe(false);
+  });
 });
 
 /* Protocol codes: JSON-RPC envelope only. `invalid_input` and `confirmation_required` are
  * successful tool results. Pins are hand-written and not derived from each other or from the
- * module. `-32005` is retired. Membership and count, not the live numbers. */
+ * module. `-32005` is retired. Membership, count, and the three live numbers: everything else here
+ * is a property a wrong number can satisfy, so the values need a statement of their own. */
 
 const EXPECTED_PROTOCOL_CODE_CLASSES = [
   'unauthorized',
@@ -946,6 +1134,12 @@ const CLASSES_WITHOUT_PROTOCOL_CODE = ['invalid_input', 'confirmation_required']
 
 /** Assigned to `confirmation_required` once; never reassign. */
 const RETIRED_PROTOCOL_CODE = -32005;
+
+const EXPECTED_PROTOCOL_CODES: Readonly<Record<string, number>> = {
+  unauthorized: -32000,
+  insufficient_scope: -32003,
+  upstream_failure: -32004,
+};
 
 function codeEntries(): readonly (readonly [string, number])[] {
   return Object.entries(PROTOCOL_ERROR_CODES).filter(
@@ -978,6 +1172,28 @@ describe('protocol error codes', () => {
       [...EXPECTED_PROTOCOL_CODE_CLASSES, ...CLASSES_WITHOUT_PROTOCOL_CODE].sort(),
       'a class was added or removed without deciding envelope vs tool-result'
     ).toEqual([...EXPECTED_CLASSES].sort());
+  });
+
+  it('assigns each class the exact code it was given, not merely a code in the right range', () => {
+    expect(
+      Object.keys(EXPECTED_PROTOCOL_CODES).length,
+      'entries were deleted from the value pin, and the comparison below would then demand the ' +
+        'module lose them too'
+    ).toBe(EXPECTED_PROTOCOL_CODE_COUNT);
+    expect(
+      Object.keys(EXPECTED_PROTOCOL_CODES).sort(),
+      'the value pin and the membership pin name different classes'
+    ).toEqual([...EXPECTED_PROTOCOL_CODE_CLASSES].sort());
+    expect(
+      new Set(Object.values(EXPECTED_PROTOCOL_CODES)).size,
+      'the value pin gives two classes the same number, so one of them is pinned by the other'
+    ).toBe(EXPECTED_PROTOCOL_CODE_COUNT);
+
+    expect(
+      PROTOCOL_ERROR_CODES,
+      'a code changed. Clients switch on the number, so swapping one is a wire break that ' +
+        'membership, count, range, reserved-band, SDK-avoidance and distinctness all permit'
+    ).toEqual(EXPECTED_PROTOCOL_CODES);
   });
 
   it('declares exactly the three the pin names, and no fourth', () => {
@@ -1095,6 +1311,45 @@ const RELATIVE_IMPORT_FORMS: readonly RegExp[] = [
   // CommonJS interop if the module ever stops being ESM
   /\brequire\s*\(\s*['"`](\.[^'"`]*)['"`]/g,
 ];
+
+/* Band 100..599 over payload numbers. latencyMs sentinel 604937 sits outside it, so no exemption list. */
+const HTTP_STATUS_BAND: readonly [number, number] = [100, 599];
+
+describe('HTTP status numbers', () => {
+  it('walks numbers at all, or every band assertion below is vacuous', () => {
+    expect(
+      deepNumbers(anUpstreamFailure().toLog()),
+      'the number walk found nothing in the one payload known to carry a number, so the band ' +
+        'checks below would be passing over nothing'
+    ).toContain(SENTINEL.latencyMs);
+  });
+
+  it.each(CLASSES_UNDER_TEST.map((entry) => [entry.name, entry.build] as const))(
+    '%s puts no HTTP status number in either payload',
+    (name, build) => {
+      const [low, high] = HTTP_STATUS_BAND;
+      const detail =
+        'This module knows nothing about HTTP: the transport frames the status from class, ' +
+        'and which layer owns the number is still an open decision that a payload emitting ' +
+        'one here would settle by accident';
+
+      for (const [shape, error] of [
+        ['clean', build()] as const,
+        ['with forbidden extras', build(FORBIDDEN_EXTRAS)] as const,
+      ]) {
+        for (const [column, payload] of [
+          ['toModel()', error.toModel()] as const,
+          ['toLog()', error.toLog()] as const,
+        ]) {
+          expect(
+            deepNumbers(payload).filter((n) => Number.isInteger(n) && n >= low && n <= high),
+            `${name} ${column} (${shape}) carries an integer in ${String(low)}..${String(high)}. ${detail}`
+          ).toEqual([]);
+        }
+      }
+    }
+  );
+});
 
 describe('the module', () => {
   const source = (): string =>
