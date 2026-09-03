@@ -1,9 +1,6 @@
 /**
- * Five-class error taxonomy. Exhaustive `never` switch so a sixth class fails the build.
- *
- * `toModel()` and `toLog()` return separate objects: one serialised twice would make the split
- * decorative. This module imports nothing and knows nothing about HTTP; transport frames status
- * and `WWW-Authenticate` from `class`.
+ * Five-class taxonomy. Exhaustive `never` so a sixth class fails the build.
+ * Separate `toModel()`/`toLog()`. Leaf module; transport frames HTTP from `class`.
  */
 
 export const MCP_ERROR_CLASSES = [
@@ -19,26 +16,17 @@ export type McpErrorClass = (typeof MCP_ERROR_CLASSES)[number];
 /** Returned to the model as a tool result, not a protocol failure. */
 type ModelFacingErrorClass = Extract<McpErrorClass, 'invalid_input' | 'confirmation_required'>;
 
-/**
- * Classes reported as a JSON-RPC error (no tool result). Written as a subtraction so a sixth
- * class lands here until someone decides which side it belongs on.
- *
- * `confirmation_required` is thrown internally; on the wire it is a successful pending-action
- * result, same as `invalid_input`.
- */
+/** JSON-RPC classes. A sixth lands here. `confirmation_required` is a pending-action on the wire. */
 export type ProtocolErrorClass = Exclude<McpErrorClass, ModelFacingErrorClass>;
 
-/**
- * Application codes in -32000..-32019. Skip -32001/-32002 (SDK). Never reuse retired -32005.
- * Values are `number` so callers do not pin a literal; keys are exact so a class add/remove fails here.
- */
+/** Codes in -32000..-32019. Skip SDK -32001/-32002. Never reuse retired -32005. */
 export const PROTOCOL_ERROR_CODES: Readonly<Record<ProtocolErrorClass, number>> = {
   unauthorized: -32000,
   insufficient_scope: -32003,
   upstream_failure: -32004,
 };
 
-/** Static literals. A mapped record so a sixth class fails the build here too. */
+/** Mapped so a sixth class fails the build here too. */
 const MODEL_MESSAGES = {
   unauthorized: 'Authentication is required, or the credential presented was not accepted.',
   insufficient_scope: 'The granted scopes do not cover this operation.',
@@ -47,7 +35,7 @@ const MODEL_MESSAGES = {
   confirmation_required: 'This action needs the user to confirm it before it can run.',
 } as const satisfies Readonly<Record<McpErrorClass, string>>;
 
-/* One init per class. No body, stack, status, or details bag — extras are stripped. */
+/* One init per class. No body, stack, status, or details bag. Extras are stripped. */
 
 export interface UnauthorizedInit {
   readonly class: 'unauthorized';
@@ -78,7 +66,7 @@ export interface InvalidInputInit {
 
 export interface UpstreamFailureInit {
   readonly class: 'upstream_failure';
-  /** Family such as `5xx` or `timeout`; never a status code; log-only. */
+  /** Family such as `5xx` or `timeout`. Never a status code. Log-only. */
   readonly statusClass: string;
   /** Log-only stable identifier. */
   readonly errorCode: string;
@@ -92,7 +80,7 @@ export interface ConfirmationRequiredInit {
   readonly class: 'confirmation_required';
   /** Server-side wording of the resolved arguments. */
   readonly summary: string;
-  /** Same name as the input argument so it round-trips untransformed. */
+  /** Same name as the input argument; round-trips untransformed. */
   readonly confirmation_token: string;
   /** Omitted when absent or empty; never present as `[]`. */
   readonly unresolved_items?: readonly string[];
@@ -105,7 +93,7 @@ export type McpErrorInit =
   | UpstreamFailureInit
   | ConfirmationRequiredInit;
 
-/** Assistant-facing. Generic wherever detail helps an attacker more than a client. */
+/** Assistant-facing. Generic wherever detail helps an attacker. */
 export type McpErrorModelPayload =
   | {
       readonly class: 'unauthorized';
@@ -115,7 +103,7 @@ export type McpErrorModelPayload =
   | {
       readonly class: 'insufficient_scope';
       readonly message: string;
-      /** Challenge error identifier. Transport frames it; this module names it. */
+      /** Challenge identifier. Transport frames it; this module names it. */
       readonly error: 'insufficient_scope';
       readonly requiredScope: string;
       readonly resourceMetadataUrl: string;
@@ -176,21 +164,21 @@ export type McpErrorLogPayload =
       readonly confirmation_token: string;
     };
 
-/** Omit the key when items are absent or empty. Copy the array so no caller reference escapes. */
+/** Omit when absent or empty. Copy so no caller reference escapes. */
 function renderUnresolvedItems(items: readonly string[] | undefined): {
   unresolved_items?: readonly string[];
 } {
   return items === undefined || items.length === 0 ? {} : { unresolved_items: [...items] };
 }
 
-/** Exhaustive-switch refusal: throw; interpolate class only. */
+/** Exhaustive-switch refusal. Interpolate class only. */
 function refuseUndeclaredClass(unreachable: never): never {
   throw new TypeError(
     `McpError: undeclared error class ${String((unreachable as { class?: unknown }).class)}`
   );
 }
 
-/** Copy declared fields only. A sixth class or a cast-in extra throws rather than leaking later. */
+/** Declared fields only. A sixth class or a cast-in extra throws. */
 function declaredFieldsOnly(init: McpErrorInit): McpErrorInit {
   switch (init.class) {
     case 'unauthorized':
@@ -233,19 +221,16 @@ function declaredFieldsOnly(init: McpErrorInit): McpErrorInit {
   }
 }
 
-/**
- * The one error type thrown across this server. Constructed at the throw site with everything the
- * log needs; the transport boundary is the only caller of `toModel()`.
- */
+/** Thrown with the log payload. Transport is the only caller of `toModel()`. */
 export class McpError extends Error {
   readonly class: McpErrorClass;
 
-  /** Private and rebuilt from declared fields, so the raw init is neither retained nor reachable. */
+  /** Rebuilt from declared fields. The raw init is neither retained nor reachable. */
   readonly #init: McpErrorInit;
 
   constructor(init: McpErrorInit) {
-    // Rebuild before super(). The caller's object is read once: a getter can change on a second
-    // read, and `class` selects the message. A refused init never produces a half-built Error.
+    // Rebuild before super(): a getter can change on a second read. `class` selects the
+    // message. A refused init never produces a half-built Error.
     const declared = declaredFieldsOnly(init);
     super(MODEL_MESSAGES[declared.class]);
     this.name = 'McpError';
@@ -253,7 +238,7 @@ export class McpError extends Error {
     this.class = this.#init.class;
   }
 
-  /** A fresh object every call. Never the log payload, and never a view onto it. */
+  /** Fresh object. Never the log payload or a view onto it. */
   toModel(): McpErrorModelPayload {
     const init = this.#init;
     switch (init.class) {
@@ -298,7 +283,7 @@ export class McpError extends Error {
     }
   }
 
-  /** A fresh object every call, and a different one from `toModel()`. */
+  /** Fresh object, different from `toModel()`. */
   toLog(): McpErrorLogPayload {
     const init = this.#init;
     switch (init.class) {
