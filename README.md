@@ -44,15 +44,29 @@ disable it.
 Configuration is validated at startup and the process refuses to start on a missing or malformed
 value. Nothing security-relevant defaults.
 
-Two variables are read today, because they are the only two the transport needs:
+Ten variables are read today. Nine are required, and a missing one stops the process at startup
+rather than being filled in.
 
-| Variable              | Required | Description                                                                      |
-| --------------------- | -------- | -------------------------------------------------------------------------------- |
-| `PORT`                | Yes      | The port to listen on. Render injects it.                                        |
-| `MCP_ALLOWED_ORIGINS` | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard. |
+| Variable                        | Required | Description                                                                                                                                                                                                                                      |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                          | Yes      | The port to listen on. Render injects it.                                                                                                                                                                                                        |
+| `MCP_ALLOWED_ORIGINS`           | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard.                                                                                                                                                                 |
+| `MCP_JWKS_URL`                  | Yes      | Where verification keys are fetched from. `https:` only, with no exemption for loopback.                                                                                                                                                         |
+| `MCP_EXPECTED_ISSUER`           | Yes      | The `iss` claim a token must carry. Stored verbatim — it is compared byte for byte.                                                                                                                                                              |
+| `MCP_AUTH_SERVER_URL`           | Yes      | The authorization server named in this server's public metadata. No userinfo, query or fragment.                                                                                                                                                 |
+| `MCP_RESOURCE_IDENTIFIER`       | Yes      | This server's canonical identifier including its path. Also the expected audience.                                                                                                                                                               |
+| `MCP_JWKS_CACHE_TTL_S`          | Yes      | How long a fetched key set may be reused, in seconds. Between 60 and 86400.                                                                                                                                                                      |
+| `MCP_REQUEST_DEADLINE_MS`       | Yes      | The end-to-end deadline for one request, in milliseconds. Not a per-call timeout. At most 600000.                                                                                                                                                |
+| `MCP_CLIENT_ASSERTION_KEY`      | Yes      | This server's own private key, PKCS#8 PEM, for `private_key_jwt` at the introspection and exchange endpoints. Parsed at startup, so an unreadable key stops the process instead of surfacing as an outage on the first request. Asymmetric only. |
+| `MCP_REVOKED_GRANT_CACHE_TTL_S` | No       | How long an already-inactive grant may be refused from cache, in seconds. Up to 300; **defaults to 0**, meaning ask every time. It never caches an active answer and never permits a call, so it can only ever refuse faster.                    |
 
 `MCP_ALLOWED_ORIGINS` entries are parsed as URLs and reduced to hostnames; the guard is
 port-agnostic. A malformed entry fails startup rather than being skipped.
+
+`MCP_CLIENT_ASSERTION_KEY` is required before anything consumes it, which is deliberate: the
+introspection modules that need it are built and unwired, and a variable that appears only once
+its consumer ships is a variable every deployment discovers late. It is this server's own
+credential, not a platform secret, and it is never logged.
 
 The full set of variables the finished service takes is fixed by the implementation plan and is
 added as each module lands. `JWT_TOKEN`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` are absent by

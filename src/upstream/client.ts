@@ -64,6 +64,20 @@ function assertUsableDeadline(deadlineMs: number | undefined): void {
 }
 
 /**
+ * Same check without the absent-deadline hatch. Auth-server calls must always be bounded;
+ * an absent deadline attaches no abort signal. Kept separate from `assertUsableDeadline`:
+ * the key-set GET may run unbounded; one shared optional helper would re-open the hatch.
+ */
+function requireUsableDeadline(deadlineMs: number): void {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new TypeError(
+      'Authorization-server calls require a positive finite deadline in milliseconds. This ' +
+        'request carries a slice of the one end-to-end budget and may not run unbounded.'
+    );
+  }
+}
+
+/**
  * GET with no credential. Headers are allowlisted, so Authorization/Cookie never reach the wire.
  * No query/body assembly, so the identity deny-list does not apply on this path.
  */
@@ -87,6 +101,52 @@ export async function getWithoutCredential(options: UnauthenticatedGetOptions): 
       : { signal: AbortSignal.timeout(options.deadlineMs) }),
   });
 }
+export interface FormPostOptions {
+  readonly url: string | URL;
+  /** Server-assembled named fields. Never a caller's argument bag. */
+  readonly form: Readonly<Record<string, string>>;
+  /**
+   * Remaining request-budget slice, in ms. Required: there is no unbounded form of this call.
+   * The key-set GET keeps an optional deadline; that is a different contract.
+   */
+  readonly deadlineMs: number;
+  /** Inbound request id, or `undefined` to mint one. Key required so omission is visible. */
+  readonly correlationId: string | undefined;
+  readonly redirect: 'error' | 'follow' | 'manual';
+}
+
+/**
+ * Form-encoded POST with no `Authorization` header. Auth-server endpoints take
+ * `private_key_jwt` in the body. Identity deny-list applies and refuses loudly (a
+ * server-assembled identity field is a call-site bug, not an untrusted arg to strip).
+ */
+export async function postFormWithoutCredential(options: FormPostOptions): Promise<Response> {
+  requireUsableDeadline(options.deadlineMs);
+
+  const body = new URLSearchParams();
+  for (const [field, value] of Object.entries(options.form)) {
+    if (isIdentityField(field)) {
+      throw new TypeError(
+        `Refusing to send the identity field "${field}" to the authorization server. Identity is ` +
+          'derived from the subject token by the issuer, never taken from a request parameter.'
+      );
+    }
+    body.set(field, value);
+  }
+
+  const headers = new Headers({ 'content-type': 'application/x-www-form-urlencoded' });
+  headers.set(CORRELATION_ID_HEADER, options.correlationId ?? crypto.randomUUID());
+
+  // Unconditional: the deadline is required, so there is no arm where a signal is absent.
+  return fetch(String(options.url), {
+    method: 'POST',
+    headers,
+    body: body.toString(),
+    redirect: options.redirect,
+    signal: AbortSignal.timeout(options.deadlineMs),
+  });
+}
+
 function normalizeFieldName(field: string): string {
   return field.replaceAll(/[^a-zA-Z0-9]/g, '').toLowerCase();
 }

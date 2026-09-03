@@ -4,6 +4,7 @@
  * security-relevant defaults anywhere.
  */
 
+import { generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../../src/config/index.ts';
 import { protectedResourceMetadataUrl } from '../../../src/auth/challenge.ts';
@@ -26,9 +27,19 @@ const REQUIRED_VARS = [
   'MCP_RESOURCE_IDENTIFIER',
   'MCP_JWKS_CACHE_TTL_S',
   'MCP_REQUEST_DEADLINE_MS',
+  'MCP_CLIENT_ASSERTION_KEY',
 ] as const;
 
 type RequiredVar = (typeof REQUIRED_VARS)[number];
+
+/**
+ * Generated per run, never committed: a private key in a fixture file is the secret-shaped test
+ * fixture the credential rule refuses. EC because it is fast and the loader pins no algorithm —
+ * choosing one is the assertion signer's job, not the loader's.
+ */
+const CLIENT_ASSERTION_KEY_PEM = generateKeyPairSync('ec', { namedCurve: 'P-256' })
+  .privateKey.export({ type: 'pkcs8', format: 'pem' })
+  .toString();
 
 /** A complete, valid deployment configuration in test clothing. */
 const VALID: Record<RequiredVar, string> = {
@@ -40,6 +51,7 @@ const VALID: Record<RequiredVar, string> = {
   MCP_RESOURCE_IDENTIFIER: MCP_RESOURCE_IDENTIFIER,
   MCP_JWKS_CACHE_TTL_S: '600',
   MCP_REQUEST_DEADLINE_MS: '30000',
+  MCP_CLIENT_ASSERTION_KEY: CLIENT_ASSERTION_KEY_PEM,
 };
 
 const WHOLE_NUMBER_VARS = ['MCP_JWKS_CACHE_TTL_S', 'MCP_REQUEST_DEADLINE_MS'] as const;
@@ -682,5 +694,86 @@ describe('what the generic startup helpers are allowed to say', () => {
       expect(message).toContain('MCP_EXPECTED_ISSUER');
       expect(message.toLowerCase()).toContain('missing');
     }
+  });
+});
+
+/**
+ * Ticket 59's two additions. The key is PARSED at startup rather than carried as a string,
+ * because the alternative is discovering it is unreadable when the first request tries to
+ * introspect — at which point a configuration error is wearing an upstream-failure costume.
+ */
+describe('the client assertion key', () => {
+  it('is loaded as an asymmetric private key, not a string', () => {
+    const config = loadConfig();
+
+    expect(config.clientAssertionKey.type).toBe('private');
+    expect(
+      config.clientAssertionKey.asymmetricKeyType,
+      'private_key_jwt is proof of possession: a symmetric secret cannot be what this holds'
+    ).toBeDefined();
+  });
+
+  it('refuses a value that is not a readable private key, without echoing it', () => {
+    const notAKey =
+      '-----BEGIN PRIVATE KEY-----\nNOT-A-KEY-SECRET-MARKER\n-----END PRIVATE KEY-----';
+    set('MCP_CLIENT_ASSERTION_KEY', notAKey);
+
+    try {
+      loadConfig();
+      expect.unreachable('an unreadable key must stop the process at startup');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('MCP_CLIENT_ASSERTION_KEY');
+      expect(message, 'the variable name and the constraint, never the value').not.toContain(
+        'NOT-A-KEY-SECRET-MARKER'
+      );
+    }
+  });
+
+  it('refuses a public key in the private key variable', () => {
+    const publicPem = generateKeyPairSync('ec', { namedCurve: 'P-256' })
+      .publicKey.export({ type: 'spki', format: 'pem' })
+      .toString();
+    set('MCP_CLIENT_ASSERTION_KEY', publicPem);
+
+    expect(() => loadConfig()).toThrow(/MCP_CLIENT_ASSERTION_KEY/);
+  });
+});
+
+/**
+ * The negative-grant cache. Optional because 0 — ask every time — is both the default and the
+ * safe direction: it never caches a positive answer and never permits dispatch, so correctness
+ * does not depend on it.
+ */
+describe('the revoked grant cache lifetime', () => {
+  it('defaults to asking every time when unset or blank', () => {
+    for (const value of [undefined, '', '   ']) {
+      set('MCP_REVOKED_GRANT_CACHE_TTL_S', value);
+      expect(
+        loadConfig().revokedGrantCacheMaxAgeMs,
+        'a knob nobody set must not start suppressing checks'
+      ).toBe(0);
+    }
+  });
+
+  it('is configured in seconds and stored in milliseconds', () => {
+    set('MCP_REVOKED_GRANT_CACHE_TTL_S', '60');
+    expect(loadConfig().revokedGrantCacheMaxAgeMs).toBe(60_000);
+  });
+
+  it('accepts the documented ceiling and refuses anything past it', () => {
+    set('MCP_REVOKED_GRANT_CACHE_TTL_S', '300');
+    expect(loadConfig().revokedGrantCacheMaxAgeMs).toBe(300_000);
+
+    set('MCP_REVOKED_GRANT_CACHE_TTL_S', '301');
+    expect(
+      () => loadConfig(),
+      'a refusal nobody can clear without a restart is no longer blunting abuse'
+    ).toThrow(/MCP_REVOKED_GRANT_CACHE_TTL_S/);
+  });
+
+  it.each(REFUSED_WHOLE_NUMBERS)('refuses %s rather than parsing a prefix of it', (value) => {
+    set('MCP_REVOKED_GRANT_CACHE_TTL_S', value);
+    expect(() => loadConfig()).toThrow(/MCP_REVOKED_GRANT_CACHE_TTL_S/);
   });
 });
