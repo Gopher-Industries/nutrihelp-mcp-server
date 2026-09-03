@@ -8,7 +8,7 @@ import 'dotenv/config';
 
 import { createServer, type Server } from 'node:https';
 import { createPublicKey, KeyObject } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { exportJWK, importJWK, type JWK } from 'jose';
 import { createTestKeyPair, makeToken, MCP_TOKEN_ALG, type TestKeyPair } from './makeToken.ts';
@@ -136,16 +136,26 @@ export async function derivePublicJwk(
   return jwk;
 }
 
-/** Same factory as the tests, so mint and JWKS cannot drift. */
-async function loadOrCreateKeyPair(): Promise<TestKeyPair> {
+/**
+ * Same factory as the tests, so mint and JWKS cannot drift.
+ * When a key must be generated, returns the write rather than performing it, so the caller can
+ * defer persist until after a successful bind. An existing key loads without writing.
+ */
+async function loadOrCreateKeyPair(): Promise<{
+  readonly key: TestKeyPair;
+  readonly persist: (() => void) | undefined;
+}> {
   const stored = loadStoredKey();
   if (stored !== undefined) {
     const privateKey = await toPrivateKey(stored.privateJwk, stored.alg);
     return {
-      kid: stored.kid,
-      alg: stored.alg,
-      privateKey,
-      publicJwk: await derivePublicJwk(privateKey, stored.kid, stored.alg),
+      key: {
+        kid: stored.kid,
+        alg: stored.alg,
+        privateKey,
+        publicJwk: await derivePublicJwk(privateKey, stored.kid, stored.alg),
+      },
+      persist: undefined,
     };
   }
 
@@ -155,9 +165,13 @@ async function loadOrCreateKeyPair(): Promise<TestKeyPair> {
     alg: created.alg,
     privateJwk: await exportJWK(created.privateKey),
   };
-  // Private signing key: not world-readable (mode is inert on Windows).
-  writeFileSync(SIGNING_KEY_FILE, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
-  return created;
+  return {
+    key: created,
+    // Private signing key: not world-readable (mode is inert on Windows).
+    persist: (): void => {
+      writeFileSync(SIGNING_KEY_FILE, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+    },
+  };
 }
 
 /** Refuse query/fragment: the server pins scheme only, and a 404 here looks like a cert-trust failure. */
@@ -229,14 +243,14 @@ async function main(): Promise<void> {
   const audience = new URL(readEnv('MCP_RESOURCE_IDENTIFIER')).href;
   const port = readEnv('PORT');
 
-  // 0o700 is a floor on Unix; inert on Windows (see README icacls).
-  mkdirSync(DEV_DIR, { recursive: true, mode: 0o700 });
+  // No mkdir: every write path needs the cert below, which already requires `.dev/`. Creating it
+  // early would leave an empty directory on a run that then fails, under "nothing was changed".
 
   // Fail on a missing cert before writing a key pair.
   const tlsKey = readFileOrExplain(TLS_KEY_FILE, 'local TLS key');
   const tlsCert = readFileOrExplain(TLS_CERT_FILE, 'local TLS certificate');
 
-  const key = await loadOrCreateKeyPair();
+  const { key, persist } = await loadOrCreateKeyPair();
   const jwks = { keys: [await derivePublicJwk(key.privateKey, key.kid, key.alg)] };
 
   const server = createServer({ key: tlsKey, cert: tlsCert }, (request, response) => {
@@ -251,9 +265,10 @@ async function main(): Promise<void> {
     response.end(JSON.stringify({ error: 'not_found', serving: jwksUrl.pathname }));
   });
 
-  // Bind first: a failed refresh must not replace inspector.json with a token nobody saw.
+  // Bind first: a failed refresh must not write inspector.json or a newly generated signing key.
   const { hostname, port: jwksPort } = jwksAddress(jwksUrl);
   await bind(server, hostname, jwksPort);
+  persist?.();
 
   const token = await makeToken({
     key,

@@ -94,7 +94,10 @@ PowerShell carry a PowerShell form where they appear.
 
 ### 1. Write a `.env`
 
-```bash
+This block is the **contents** of a file, not commands to paste at a prompt. Create `.env` in the
+repository root and put this in it:
+
+```ini
 PORT=3000
 MCP_ALLOWED_ORIGINS=http://localhost:6274,http://127.0.0.1:6274
 MCP_JWKS_URL=https://127.0.0.1:8443/jwks
@@ -181,8 +184,15 @@ copied out of `.dev/` leaves it behind.
 leaves you believing the directory is protected. Git for Windows mounts every drive `noacl`, so
 `chmod 700` succeeds silently and `ls -ld .dev` still reports `drwxr-xr-x`. What actually governs
 the directory is the NTFS access list it inherits from above, and a checkout outside your own
-profile typically inherits an entry like `BUILTIN\Users:(I)(RX)` — every local account can read both
-keys. Replace the inherited list with your own account:
+profile typically inherits `BUILTIN\Users:(I)(RX)` — every local account can read both keys.
+
+**Do not go looking for that entry, though — it is rarely the only one and often not the worst.**
+An inherited list can carry others that grant more: `NT AUTHORITY\Authenticated Users:(I)(M)` is
+one such entry, and `(M)` is Modify, so an account holding it can rewrite the signing key rather
+than merely read it. Which entries any particular checkout inherits depends on where it sits, so
+**no list of names is the check** — hunting for this second name is the same mistake as hunting
+for the first. The question is not _"is `BUILTIN\Users` present"_ but _"is anything other than me
+present"_. Replace the inherited list with your own account:
 
 ```bash
 # Git Bash
@@ -208,10 +218,12 @@ MSYS_NO_PATHCONV=1 icacls .dev/tls-key.pem
 ```
 
 Your account should be the only line in each — `(OI)(CI)(F)` on the directory, `(I)(F)` on the file.
-The file is the half worth looking at, because it existed before the directory was stamped: seeing
-`(I)(F)` alone on it is what proves the inherited `BUILTIN\Users:(I)(RX)` is gone rather than still
-sitting on a key that was already there. The listing drops the SYSTEM and Administrators entries
-too, which changes nothing an administrator could not already do by taking ownership. Unlike the
+Read it as a whole list and check that nothing else is on it; do not scan for a particular name,
+for the reason above. The file is the half worth looking at, because it existed before the
+directory was stamped: seeing `(I)(F)` **alone** on it is what proves the inherited entries are
+gone rather than still sitting on a key that was already there. The listing drops the SYSTEM and
+Administrators entries too, which changes nothing an administrator could not already do by taking
+ownership. Unlike the
 `openssl` block above, `MSYS_NO_PATHCONV=1` is precautionary here rather than load-bearing:
 `/inheritance:r` and `/grant:r` carry a colon, so MSYS leaves them alone with or without it.
 
@@ -302,6 +314,17 @@ curl -s -i -X POST http://localhost:3000/mcp \
 `404` with `-32601` is the correct result today: the token was accepted and dispatch found no
 tool, because none is registered. A `401` there means the token was refused; the server log names
 which check refused it.
+
+**The challenge that comes back with the `401` names a URL you cannot dial in this setup, and that
+is not a fault.** It reads
+`WWW-Authenticate: Bearer resource_metadata="https://localhost:3000/.well-known/oauth-protected-resource/mcp"`
+— `https:`, because it is built from `MCP_RESOURCE_IDENTIFIER`, which step 1 explains is an
+identifier and an audience rather than an address. The dev server listens on plain `http:`, so
+dialling that URL verbatim fails the TLS handshake rather than returning the document
+(`curl: (35) schannel: ... SEC_E_INVALID_TOKEN`, or `OpenSSL ... wrong version number`). Swap the
+scheme to `http:` and it answers — which is what the first curl above already does. In a deployed
+configuration the identifier and the address are the same URL and the challenge is dialable as
+printed.
 
 The same three checks in PowerShell. The envelope is built once as a hashtable and handed to
 `ConvertTo-Json`, so there is no quoting to get wrong:

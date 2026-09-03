@@ -236,7 +236,11 @@ function restrictedImports(
 export default tseslint.config(
   {
     // server.js is a 0-byte pre-v2 leftover; delete the file and this entry together.
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'server.js'],
+    // test/TMP_*/** is the issuer suite's scratch tree (must sit in-repo for bare imports).
+    // `.gitignore` covers it; flat ESLint does not read `.gitignore` (prettier does). Without
+    // this entry an interrupted run leaves a copy of src/upstream/client.ts that calls fetch
+    // outside the egress exemption path, so `lint` fails on a path `git status` cannot show.
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'server.js', 'test/TMP_*/**'],
   },
 
   eslint.configs.recommended,
