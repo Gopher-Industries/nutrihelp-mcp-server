@@ -155,11 +155,8 @@ describe('a user identifier smuggled into tool arguments', () => {
       true
     );
 
-<<<<<<< HEAD
     // The real upstream client is the source of truth for the deny-list, so the file must exist.
-=======
     // Swap guard: file existence because a dynamic import won't resolve while the file is absent.
->>>>>>> 6cf4cbb1c18ac06441eb647b5d8f882c289baa43
     const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
     expect(
       existsSync(clientModule),

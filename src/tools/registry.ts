@@ -6,7 +6,7 @@
  */
 import type { McpServer, McpRequestContext } from '@modelcontextprotocol/server';
 // 1. Import the plain descriptor package directly from the tool file
-import * as nutritionLookup from './nutritionLookup.ts';
+import { descriptor as nutritionLookup } from './nutritionLookup.ts';
 
 export interface RegistryConfig {
   readonly nutrihelpApiBaseUrl: string;
@@ -20,8 +20,7 @@ export function registerTools(
   // 2. Build a declarative list of standard, unauthenticated tools
   const publicTools = [
     {
-      name: 'nutrition_lookup',
-      descriptor: nutritionLookup,
+      ...nutritionLookup,
     },
     // Future public tools can be cleanly added to this array
   ];
@@ -30,11 +29,8 @@ export function registerTools(
   for (const tool of publicTools) {
     server.registerTool(
       tool.name,
-      {
-        ...tool.descriptor.contract,
-        inputSchema: tool.descriptor.inputSchema,
-      },
-      tool.descriptor.handler(config)
+      { ...tool.contract, inputSchema: tool.inputSchema },
+      tool.handler(config)
     );
   }
 

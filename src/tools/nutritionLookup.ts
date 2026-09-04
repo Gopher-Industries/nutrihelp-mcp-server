@@ -16,10 +16,9 @@ const NUTRITION_FIELDS = [
   'vitamin_d',
   'sodium',
   'sugar',
-  'allergies_type',
   'serving_size',
 ] as const;
-const MAX_CANDIDATES = 5;
+const MAX_CANDIDATES = 1;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 
 export const inputSchema = z.object({
@@ -43,7 +42,6 @@ const NutritionItemSchema = z.object({
   vitamin_d: z.number().nullable(),
   sodium: z.number().nullable(),
   sugar: z.number().nullable(),
-  allergies_type: z.union([z.string(), z.number()]).nullable(),
   serving_size: z.string().nullable(),
 });
 
@@ -53,6 +51,7 @@ const OutputSchema = z.object({
   results: z.array(NutritionItemSchema),
   candidates: z.array(CandidateSchema).max(MAX_CANDIDATES).optional(),
   total_available: z.number().int().nonnegative(),
+  more_count: z.number().int().nonnegative(),
   truncated: z.boolean(),
   truncation_note: z.string().optional(),
 });
@@ -66,7 +65,7 @@ function toNutritionItem(row: Record<string, unknown>): z.infer<typeof Nutrition
 export const contract = {
   title: 'Nutrition Lookup',
   description:
-    'Search NutriHelp nutrition data. Auth is not wired yet - blocked on tickets 27/59/34. This tool requires nutrition:read and live introspection like every other tool.',
+    'Search NutriHelp nutrition data.',
   outputSchema: OutputSchema,
 } as const;
 
@@ -83,7 +82,10 @@ async function fetchNutritionData(
     const response = await fetchUpstream({
       baseUrl: config.nutrihelpApiBaseUrl,
       path: '/api/fooddata/search',
-      searchParams: { query: food },
+      declaredParameters: ['query'],
+      toolArguments: { query: food },
+      deadlineMs: undefined,
+      correlationId: undefined,
     });
     if (!response.ok) throw new RetryableUpstreamError();
 
@@ -113,7 +115,11 @@ function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
     return {
       results: [toNutritionItem(selected)],
       total_available: totalAvailable,
-      truncated: false,
+      more_count: Math.max(totalAvailable - 1, 0),
+      truncated: totalAvailable > 1,
+      ...(totalAvailable > 1
+        ? { truncation_note: 'Additional matches were omitted; refine the food search.' }
+        : {}),
     };
   }
 
@@ -129,6 +135,7 @@ function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
     results: [],
     candidates,
     total_available: totalAvailable,
+    more_count: Math.max(totalAvailable - candidates.length, 0),
     truncated: totalAvailable > MAX_CANDIDATES,
     truncation_note:
       'Multiple matches found. Call again with the same food text and the id of the one you want.',
@@ -149,6 +156,7 @@ export const handler =
             text: JSON.stringify({
               results: [],
               total_available: rows.length,
+              more_count: rows.length,
               truncated: true,
               truncation_note: 'Response exceeded the 32 KiB limit; refine the food search.',
             }),
@@ -162,3 +170,10 @@ export const handler =
       structuredContent: output,
     };
   };
+
+export const descriptor = {
+  name: 'nutrition_lookup',
+  contract,
+  inputSchema,
+  handler,
+} as const;

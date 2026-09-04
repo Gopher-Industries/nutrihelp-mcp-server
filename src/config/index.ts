@@ -86,7 +86,6 @@ function requiredHttpsUrl(name: string): URL {
   return requiredHttps(name).url;
 }
 
-<<<<<<< HEAD
 function requiredApiBaseUrl(): string {
   const value = required('NUTRIHELP_API_BASE_URL');
   const url = parseUrl('NUTRIHELP_API_BASE_URL', value);
@@ -99,7 +98,6 @@ function requiredApiBaseUrl(): string {
   return value;
 }
 
-=======
 /** Shape refusals for values published in metadata. Shared so normalisation stays a separate choice. */
 function refuseUnpublishableShape(name: string, value: string, url: URL): void {
   // Test the raw value: a trailing `?` or `#` parses to empty search/hash while `href` keeps it.
@@ -116,7 +114,6 @@ function refuseUnpublishableShape(name: string, value: string, url: URL): void {
 /** Refused in resource paths — Express re-reads these as route-pattern syntax. */
 const ROUTE_PATTERN_METACHARACTERS = /[:*(){}?+[\]]/;
 
->>>>>>> 6cf4cbb1c18ac06441eb647b5d8f882c289baa43
 /**
  * Scheme-pinned and normalised — opposite of the issuer. This server publishes the canonical
  * form in its metadata, so the authorization server must echo it as `aud`.
