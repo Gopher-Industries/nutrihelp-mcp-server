@@ -91,9 +91,17 @@ const EXEMPT_ZONES = {
 const SLASH = String.raw`\x2F`;
 
 /** Selectors that are NOT part of the egress group, so the one egress door inherits them too.
- *  It is exempt from calling out, not from laundering an exemption or building code from a
- *  string. Any zone that overrides `no-restricted-syntax` must restate these. */
+ *  It is exempt from calling out, not from hiding an import target, laundering an exemption or
+ *  building code from a string. Any zone that overrides `no-restricted-syntax` must restate
+ *  these. */
 const NON_EGRESS_SYNTAX = [
+  {
+    // A `source.value` test only sees a Literal. A non-literal could name an egress mechanism or
+    // any import-chain target, so no source module gets to make the target unanalysable.
+    selector: "ImportExpression[source.type!='Literal']",
+    message:
+      'Dynamic import with a non-literal specifier cannot be checked against the egress and import-chain lists, so it is refused. Use a literal.',
+  },
   {
     // `no-restricted-imports` never sees a dynamic import, so EXEMPT_ZONES needs a counterpart.
     selector: `ImportExpression[source.value=/(^|${SLASH})(${EXEMPT_DIRS.join('|')})${SLASH}|(^|${SLASH})(${EXEMPT_CONFIG_FILES.map(
@@ -121,14 +129,6 @@ const EGRESS_IMPORT_SYNTAX = [
   {
     selector: `ImportExpression[source.value=/${EGRESS_DYNAMIC_RE}/]`,
     message: 'Only src/upstream/client.ts may import an egress mechanism.',
-  },
-  {
-    // A `source.value` test only sees a Literal. `const s = 'node:http'; import(s)` and
-    // `import('node:' + 'http')` have no `value` to match, so they walked straight past the
-    // selector above. An unanalysable specifier is refused outright rather than waved through.
-    selector: "ImportExpression[source.type!='Literal']",
-    message:
-      'Dynamic import with a non-literal specifier cannot be checked against the egress list, so it is refused. Use a literal.',
   },
 ];
 
@@ -218,19 +218,100 @@ const CHAIN_CONFIG = {
   message: 'Only src/server.ts may import src/config/index.ts. No config reads elsewhere.',
 };
 
+/**
+ * Translate the small glob grammar used by an import-chain group into an anchored regex for an
+ * ImportExpression selector. Dynamic and static restrictions therefore consume the same group
+ * constant: adding a spelling to one automatically adds it to the other.
+ *
+ * Supported forms are the forms used above: an optional leading double-star path segment,
+ * literal path segments, and `*` within a segment. Refuse a new grammar rather than silently
+ * generating a weaker rule.
+ */
+function importGlobToRegex(glob) {
+  const segments = glob.split('/');
+  let pattern = '^';
+
+  if (segments[0] === '**') {
+    pattern += `(?:.*${SLASH})?`;
+    segments.shift();
+  }
+
+  if (segments.includes('**')) {
+    throw new Error(`Unsupported import-chain glob: ${glob}`);
+  }
+
+  const regexpMeta = new Set(['\\', '^', '$', '.', '+', '?', '(', ')', '[', ']', '{', '}', '|']);
+  pattern += segments
+    .map((segment) =>
+      [...segment]
+        .map((character) => {
+          if (character === '*') return `[^${SLASH}]*`;
+          return regexpMeta.has(character) ? `\\${character}` : character;
+        })
+        .join('')
+    )
+    .join(SLASH);
+
+  return `${pattern}$`;
+}
+
+function dynamicImportRestriction({ group, message }) {
+  const included = group.filter((glob) => !glob.startsWith('!'));
+  const excluded = group.filter((glob) => glob.startsWith('!')).map((glob) => glob.slice(1));
+
+  if (included.length === 0) {
+    throw new Error('An import-chain group must include at least one positive pattern.');
+  }
+
+  const includedRegex = included.map(importGlobToRegex).join('|');
+  const exclusions = excluded
+    .map((glob) => `:not([source.value=/${importGlobToRegex(glob)}/])`)
+    .join('');
+
+  return {
+    selector: `ImportExpression[source.value=/(?:${includedRegex})/]${exclusions}`,
+    message: `${message} Dynamic import is not an exception.`,
+  };
+}
+
+/** The three trust-boundary chains. Both rule families below ask this one function for them. */
+function importChainGroups({ upstreamClient = false, toolModules = false, config = false } = {}) {
+  const groups = [];
+  if (!upstreamClient) groups.push(CHAIN_UPSTREAM);
+  if (!toolModules) groups.push(CHAIN_TOOL_MODULES);
+  if (!config) groups.push(CHAIN_CONFIG);
+  return groups;
+}
+
+const CHAIN_TOOL_SIBLING_DYNAMIC = dynamicImportRestriction(CHAIN_TOOL_SIBLING);
+
+const TOOL_DESCRIPTION_SYNTAX = [
+  {
+    selector: "CallExpression[callee.property.name='describe'] > TemplateLiteral",
+    message: 'Tool descriptions are string literals. No interpolation.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='describe'] > BinaryExpression",
+    message: 'Tool descriptions are string literals. No concatenation.',
+  },
+];
+
 /** A `files:` override REPLACES a rule's options rather than merging them, so every zone
  *  restates the whole rule. Flags are `true` = permitted; `extra` appends restrictions. */
-function restrictedImports(
-  { egress = false, upstreamClient = false, toolModules = false, config = false } = {},
-  extra = []
-) {
+function restrictedImports(options = {}, extra = []) {
+  const { egress = false } = options;
   // EXEMPT_ZONES has no flag: a flag would be a switch for turning the laundering path back on.
   const patterns = [ESTATE_MIDDLEWARE_GROUP, EXEMPT_ZONES];
   if (!egress) patterns.push(EGRESS_MODULE_GROUP);
-  if (!upstreamClient) patterns.push(CHAIN_UPSTREAM);
-  if (!toolModules) patterns.push(CHAIN_TOOL_MODULES);
-  if (!config) patterns.push(CHAIN_CONFIG);
+  patterns.push(...importChainGroups(options));
   return ['error', { patterns: [...patterns, ...extra] }];
+}
+
+function restrictedSyntax(options = {}, extra = []) {
+  const { egress = false } = options;
+  const base = egress ? NON_EGRESS_SYNTAX : EGRESS_SYNTAX;
+  const chainSelectors = importChainGroups(options).map(dynamicImportRestriction);
+  return ['error', ...base, ...chainSelectors, ...extra];
 }
 
 export default tseslint.config(
@@ -261,7 +342,7 @@ export default tseslint.config(
         })),
       ],
       'no-restricted-imports': restrictedImports(),
-      'no-restricted-syntax': ['error', ...EGRESS_SYNTAX],
+      'no-restricted-syntax': restrictedSyntax(),
 
       // The other two axis-5 resolvers. Unscoped: nothing here builds code from a string.
       'no-eval': 'error',
@@ -287,7 +368,7 @@ export default tseslint.config(
       'no-restricted-imports': restrictedImports({ egress: true }),
       // `['error', ...selectors]` replaces the options; a bare `['error']` RETAINS them, which
       // once left all four egress selectors in force on this very module.
-      'no-restricted-syntax': ['error', ...NON_EGRESS_SYNTAX],
+      'no-restricted-syntax': restrictedSyntax({ egress: true }),
     },
   },
 
@@ -295,13 +376,20 @@ export default tseslint.config(
 
   {
     files: ['src/auth/**', 'src/audit/logger.ts'],
-    rules: { 'no-restricted-imports': restrictedImports({ upstreamClient: true }) },
+    rules: {
+      'no-restricted-imports': restrictedImports({ upstreamClient: true }),
+      'no-restricted-syntax': restrictedSyntax({ upstreamClient: true }),
+    },
   },
 
   {
     files: ['src/tools/**'],
     rules: {
       'no-restricted-imports': restrictedImports({ upstreamClient: true }, [CHAIN_TOOL_SIBLING]),
+      'no-restricted-syntax': restrictedSyntax({ upstreamClient: true }, [
+        CHAIN_TOOL_SIBLING_DYNAMIC,
+        ...TOOL_DESCRIPTION_SYNTAX,
+      ]),
     },
   },
 
@@ -309,12 +397,19 @@ export default tseslint.config(
     files: ['src/tools/registry.ts'],
     rules: {
       'no-restricted-imports': restrictedImports({ upstreamClient: true, toolModules: true }),
+      'no-restricted-syntax': restrictedSyntax(
+        { upstreamClient: true, toolModules: true },
+        TOOL_DESCRIPTION_SYNTAX
+      ),
     },
   },
 
   {
     files: ['src/server.ts'],
-    rules: { 'no-restricted-imports': restrictedImports({ config: true }) },
+    rules: {
+      'no-restricted-imports': restrictedImports({ config: true }),
+      'no-restricted-syntax': restrictedSyntax({ config: true }),
+    },
   },
 
   {
@@ -330,25 +425,6 @@ export default tseslint.config(
   {
     files: ['src/auth/**', 'src/tools/**'],
     rules: { complexity: ['error', 8] },
-  },
-
-  {
-    files: ['src/tools/**'],
-    rules: {
-      // EGRESS_SYNTAX repeated because this override replaces the base rule's options.
-      'no-restricted-syntax': [
-        'error',
-        ...EGRESS_SYNTAX,
-        {
-          selector: "CallExpression[callee.property.name='describe'] > TemplateLiteral",
-          message: 'Tool descriptions are string literals. No interpolation.',
-        },
-        {
-          selector: "CallExpression[callee.property.name='describe'] > BinaryExpression",
-          message: 'Tool descriptions are string literals. No concatenation.',
-        },
-      ],
-    },
   },
 
   {
