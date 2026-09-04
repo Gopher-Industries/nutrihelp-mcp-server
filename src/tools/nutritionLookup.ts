@@ -64,8 +64,7 @@ function toNutritionItem(row: Record<string, unknown>): z.infer<typeof Nutrition
 
 export const contract = {
   title: 'Nutrition Lookup',
-  description:
-    'Search NutriHelp nutrition data.',
+  description: 'Search NutriHelp nutrition data.',
   outputSchema: OutputSchema,
 } as const;
 
