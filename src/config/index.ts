@@ -31,6 +31,11 @@ export interface ServerConfig {
    */
   readonly requestDeadlineMs: number;
   /**
+   * This server's client id at the authorization server (`iss`/`sub` of assertions, `act` of
+   * the exchanged credential). Verbatim, never normalised. Distinct from `resourceIdentifier`.
+   */
+  readonly clientId: string;
+  /**
    * Own credential for `private_key_jwt`. Parsed at startup so a bad key fails boot, not the
    * first introspection as an outage.
    */
@@ -132,6 +137,21 @@ function requiredResourceIdentifier(name: string): string {
   return url.href;
 }
 
+/**
+ * Scheme-pinned, path-bearing and **verbatim**: the AS compares this string as registered, so
+ * normalising would break `iss`/`sub`. The path keeps it from collapsing into the resource id.
+ */
+function requiredClientIdentifier(name: string): string {
+  const { value, url } = requiredHttps(name);
+  if (url.pathname === '/' || url.pathname === '') {
+    throw new Error(
+      `${name} must carry a path distinguishing it from the resource identifier, for example https://mcp.example/client`
+    );
+  }
+  refuseUnpublishableShape(name, value, url);
+  return value;
+}
+
 /** Scheme-pinned and verbatim, with publishability shape checks. */
 function requiredIssuerIdentifier(name: string): string {
   const { value, url } = requiredHttps(name);
@@ -224,13 +244,29 @@ export function loadConfig(): ServerConfig {
     ...new Set(allowedOrigins.map((origin) => originToHostname(origin))),
   ];
 
+  const resourceIdentifier = requiredResourceIdentifier('MCP_RESOURCE_IDENTIFIER');
+  const clientId = requiredClientIdentifier('MCP_CLIENT_ID');
+
+  // Resource is stored normalised, client verbatim — so case-only twins name one registration
+  // as different strings. Compare via URL.href (the discriminating check); raw equality is
+  // defence in depth if resource ever stops being normalised.
+  if (
+    clientId === resourceIdentifier ||
+    new URL(clientId).href === new URL(resourceIdentifier).href
+  ) {
+    throw new Error(
+      'MCP_CLIENT_ID must differ from MCP_RESOURCE_IDENTIFIER: resource and client are separate registrations at the authorization server'
+    );
+  }
+
   return {
     port,
     allowedOriginHostnames,
     jwksUrl: requiredHttpsUrl('MCP_JWKS_URL'),
     expectedIssuer: requiredHttpsVerbatim('MCP_EXPECTED_ISSUER'),
     authServerUrl: requiredIssuerIdentifier('MCP_AUTH_SERVER_URL'),
-    resourceIdentifier: requiredResourceIdentifier('MCP_RESOURCE_IDENTIFIER'),
+    resourceIdentifier,
+    clientId,
     jwksCacheMaxAgeMs:
       requiredWholeNumber('MCP_JWKS_CACHE_TTL_S', MIN_JWKS_CACHE_TTL_S, MAX_JWKS_CACHE_TTL_S) *
       1000,
