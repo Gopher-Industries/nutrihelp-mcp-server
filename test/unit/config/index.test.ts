@@ -12,6 +12,7 @@ import {
   ALLOWED_ORIGIN,
   MCP_AUTH_SERVER_URL,
   MCP_EXPECTED_ISSUER,
+  MCP_CLIENT_ID,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
 } from '../../support/testEnv.ts';
@@ -27,6 +28,7 @@ const REQUIRED_VARS = [
   'MCP_RESOURCE_IDENTIFIER',
   'MCP_JWKS_CACHE_TTL_S',
   'MCP_REQUEST_DEADLINE_MS',
+  'MCP_CLIENT_ID',
   'MCP_CLIENT_ASSERTION_KEY',
 ] as const;
 
@@ -51,6 +53,7 @@ const VALID: Record<RequiredVar, string> = {
   MCP_RESOURCE_IDENTIFIER: MCP_RESOURCE_IDENTIFIER,
   MCP_JWKS_CACHE_TTL_S: '600',
   MCP_REQUEST_DEADLINE_MS: '30000',
+  MCP_CLIENT_ID: MCP_CLIENT_ID,
   MCP_CLIENT_ASSERTION_KEY: CLIENT_ASSERTION_KEY_PEM,
 };
 
@@ -70,7 +73,12 @@ const REFUSED_WHOLE_NUMBERS = [
 
 /** The three variables read as URLs. All three go through one scheme check, so the case table
  *  asserts each rather than trusting that they share a code path. */
-const URL_VARS = ['MCP_JWKS_URL', 'MCP_AUTH_SERVER_URL', 'MCP_RESOURCE_IDENTIFIER'] as const;
+const URL_VARS = [
+  'MCP_JWKS_URL',
+  'MCP_AUTH_SERVER_URL',
+  'MCP_RESOURCE_IDENTIFIER',
+  'MCP_CLIENT_ID',
+] as const;
 
 /** Identifiers carrying no resource path. The pointer is published at origin + well-known + path,
  *  so a bare origin publishes it somewhere the document does not live. */
@@ -88,14 +96,14 @@ const WITH_USERINFO = [
 ] as const;
 
 /**
- * Identifiers carrying a query string or a fragment.
- *
- * The last two are the only shapes that separate a raw-string test from a parsed one: a value
- * ending in a bare `?` or a bare `#` parses to an empty `search` and an empty `hash` while `href`
- * keeps the character, so a check written against the parsed fields accepts a form it reads as
- * refusing — and stores the character in the audience.
+ * Variables whose shape refuses userinfo / query / fragment. Resource + auth-server URL: published
+ * unauthenticated. Client id: becomes `iss`/`sub` in assertions (never published, same refusal).
  */
-const PUBLISHED_IDENTIFIER_VARS = ['MCP_RESOURCE_IDENTIFIER', 'MCP_AUTH_SERVER_URL'] as const;
+const SHAPE_REFUSED_IDENTIFIER_VARS = [
+  'MCP_RESOURCE_IDENTIFIER',
+  'MCP_AUTH_SERVER_URL',
+  'MCP_CLIENT_ID',
+] as const;
 
 /**
  * Resource paths carrying a character Express re-reads as route-pattern syntax. The metadata route
@@ -117,6 +125,13 @@ const ROUTE_METACHARACTER_PATHS = [
  * `{` and `}` omitted: `new URL()` percent-encodes them in pathname, so they never reach the router as syntax.
  */
 
+/**
+ * Identifiers carrying a query string or a fragment.
+ *
+ * The last two separate a raw-string test from a parsed one: a bare `?` or `#` parses to empty
+ * `search`/`hash` while `href` keeps the character — so a parsed-field check accepts what it
+ * claims to refuse.
+ */
 const QUERY_OR_FRAGMENT = [
   'https://mcp.nutrihelp.test/mcp?x=1',
   'https://mcp.nutrihelp.test/mcp?x',
@@ -269,7 +284,7 @@ describe('a required variable that is absent or blank', () => {
     expect(
       REQUIRED_VARS.length,
       'anti-vacuity: dropping a variable from the required set makes it optional in silence'
-    ).toBeGreaterThanOrEqual(7);
+    ).toBeGreaterThanOrEqual(10);
     expect(BLANK_VALUES.length).toBeGreaterThanOrEqual(6);
   });
 });
@@ -315,7 +330,7 @@ describe('a URL-valued variable over cleartext or a non-network scheme', () => {
 
   it('keeps a floor under the refused-scheme table', () => {
     expect(REFUSED_SCHEMES.length).toBeGreaterThanOrEqual(3);
-    expect(URL_VARS.length).toBe(3);
+    expect(URL_VARS.length).toBe(4);
   });
 });
 
@@ -336,17 +351,17 @@ describe('the resource identifier, which is also the expected audience', () => {
    * see, since `search` and `hash` are empty for both while `href` keeps the character.
    */
   it.each(
-    PUBLISHED_IDENTIFIER_VARS.flatMap((name) =>
+    SHAPE_REFUSED_IDENTIFIER_VARS.flatMap((name) =>
       WITH_USERINFO.map((value) => [name, value] as const)
     )
-  )('%s refuses %s, which would publish a credential to unauthenticated callers', (name, value) => {
+  )('%s refuses %s, which would carry a credential into whatever reads it', (name, value) => {
     set(name, value);
 
     expect(() => loadConfig()).toThrow(/userinfo/);
   });
 
   it.each(
-    PUBLISHED_IDENTIFIER_VARS.flatMap((name) =>
+    SHAPE_REFUSED_IDENTIFIER_VARS.flatMap((name) =>
       QUERY_OR_FRAGMENT.map((value) => [name, value] as const)
     )
   )('%s refuses %s', (name, value) => {
@@ -355,8 +370,11 @@ describe('the resource identifier, which is also the expected audience', () => {
     expect(() => loadConfig()).toThrow(/query string|fragment/);
   });
 
-  it('keeps a floor under the published-identifier pair', () => {
-    expect(PUBLISHED_IDENTIFIER_VARS.length).toBe(2);
+  it('keeps a floor under the shape-refused identifier set', () => {
+    expect(
+      SHAPE_REFUSED_IDENTIFIER_VARS.length,
+      'exact, not a floor: a variable dropped from this set keeps its refusal in src and loses it here, and the direction that goes silent is always the enforcing copy gaining behaviour the readable copy never mentions'
+    ).toBe(3);
     expect(WITH_USERINFO.length).toBeGreaterThanOrEqual(2);
     expect(QUERY_OR_FRAGMENT.length).toBeGreaterThanOrEqual(6);
   });
@@ -775,5 +793,112 @@ describe('the revoked grant cache lifetime', () => {
   it.each(REFUSED_WHOLE_NUMBERS)('refuses %s rather than parsing a prefix of it', (value) => {
     set('MCP_REVOKED_GRANT_CACHE_TTL_S', value);
     expect(() => loadConfig()).toThrow(/MCP_REVOKED_GRANT_CACHE_TTL_S/);
+  });
+});
+
+/**
+ * Client identifier: HTTPS + non-empty path; verbatim (AS compares the string); distinct from
+ * `MCP_RESOURCE_IDENTIFIER`. Absence/blank/URL-shape covered by `REQUIRED_VARS` / `URL_VARS`.
+ */
+describe('the client identifier', () => {
+  /** Schemes that are not https. A client assertion signed for a cleartext audience is a
+   *  credential handed to whoever is on the path. */
+  const REFUSED_CLIENT_SCHEMES = [
+    'http://mcp.nutrihelp.test/client',
+    'file:///client',
+    'data:text/plain,client',
+  ] as const;
+
+  /** No path at all. `https://host` and `https://host/` both parse to a pathname of `/`, and the
+   *  second is the one a check written as `pathname === ''` would let through. */
+  const NO_CLIENT_PATH = ['https://mcp.nutrihelp.test', 'https://mcp.nutrihelp.test/'] as const;
+
+  /**
+   * Must survive byte for byte. Each row differs from `href` normalisation in one way (default
+   * port dropped, host lower-cased); trailing-slash row is the control `href` does not change.
+   */
+  const STORED_VERBATIM = [
+    'https://mcp.nutrihelp.test/client',
+    'https://mcp.nutrihelp.test/client/',
+    'https://mcp.nutrihelp.test:443/client',
+    'https://MCP.NutriHelp.test/Client',
+    'https://mcp.nutrihelp.test/client/v1',
+  ] as const;
+
+  it.each(REFUSED_CLIENT_SCHEMES)('refuses %s, which is not https', (value) => {
+    set('MCP_CLIENT_ID', value);
+
+    expect(() => loadConfig()).toThrow(/https/);
+  });
+
+  it.each(NO_CLIENT_PATH)('refuses %s, which carries no path', (value) => {
+    set('MCP_CLIENT_ID', value);
+
+    expect(
+      () => loadConfig(),
+      'a bare origin is one edit away from being whatever else lives at that origin, and the path is what keeps this registration apart from the resource one'
+    ).toThrow(/MCP_CLIENT_ID/);
+  });
+
+  it.each(STORED_VERBATIM)('stores %s byte for byte, never normalised', (value) => {
+    set('MCP_CLIENT_ID', value);
+
+    expect(
+      loadConfig().clientId,
+      'the authorization server compares this string against a registration row it already holds, so any normalisation here signs an assertion whose iss and sub no longer match the registration — an authentication failure at every introspection, wearing an outage costume'
+    ).toBe(value);
+  });
+
+  /**
+   * Distinctness in both spellings. Case-differing row discriminates: resource is normalised,
+   * client verbatim — stored-string equality alone would admit one registration under two names.
+   */
+  it.each([
+    { label: 'the same string', value: 'https://mcp.nutrihelp.test/mcp' },
+    { label: 'the same string in a different case', value: 'https://MCP.NutriHelp.test/mcp' },
+  ])('refuses to start when both variables are set to $label', ({ value }) => {
+    set('MCP_RESOURCE_IDENTIFIER', value);
+    set('MCP_CLIENT_ID', value);
+
+    expect(
+      () => loadConfig(),
+      'resource and client are separate registrations at the authorization server, and conflating them is hard to unwind once it holds both'
+    ).toThrow(/MCP_CLIENT_ID/);
+  });
+
+  it('names both variables when it refuses them for being equal', () => {
+    set('MCP_CLIENT_ID', MCP_RESOURCE_IDENTIFIER);
+
+    try {
+      loadConfig();
+      expect.unreachable('a client identifier equal to the resource identifier must not boot');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(
+        message,
+        'an operator cannot act on a refusal that names one half of a pair'
+      ).toContain('MCP_CLIENT_ID');
+      expect(message).toContain('MCP_RESOURCE_IDENTIFIER');
+    }
+  });
+
+  /** Anti-vacuity: a loader that refuses every client id satisfies every refusal above. */
+  it('loads a client identifier that differs from the resource identifier', () => {
+    const config = loadConfig();
+
+    expect(config.clientId, 'the configured value, stored as configured').toBe(MCP_CLIENT_ID);
+    expect(
+      config.clientId,
+      'and the two identifiers really are different values in the fixture, so the refusal above is a property of the loader rather than of a fixture that could never trip it'
+    ).not.toBe(config.resourceIdentifier);
+  });
+
+  it('keeps a floor under the client-identifier tables', () => {
+    expect(REFUSED_CLIENT_SCHEMES.length).toBeGreaterThanOrEqual(3);
+    expect(NO_CLIENT_PATH.length).toBeGreaterThanOrEqual(2);
+    expect(
+      STORED_VERBATIM.length,
+      'anti-vacuity: with no accepted values a loader that refuses every client identifier passes this block, and the port and host-case rows are the two that a normalising loader fails'
+    ).toBeGreaterThanOrEqual(5);
   });
 });

@@ -1,9 +1,8 @@
 /**
  * Security suite: access after disconnection. Ticket 33 case 5.
  *
- * WILL PASS WHEN: ticket 59 lands `src/auth/revocation.ts`, wired between offline token
- * validation and the scope check. Tokens here are structurally valid so only the grant check
- * can refuse them.
+ * Tokens are structurally valid, so only the live grant check can refuse them. Built with the
+ * real checker (`revocation: 'live'`), not the fixture default — so introspection counts are wire.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -65,7 +64,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   upstream = installUpstreamMock([trustedKey]);
-  server = await startTestServer();
+  // Real production checker at the mocked introspection endpoint; other suites use always-active.
+  server = await startTestServer({ revocation: 'live' });
 });
 
 afterEach(async () => {
@@ -78,12 +78,9 @@ afterAll(async () => {
 });
 
 describe('a grant the user disconnected', () => {
-  /**
-   * CASE 5. User who disconnected, refused on the next call. All three surfaces, including
-   * the two that need no credential.
-   */
+  /** Case 5: disconnected user refused on the next call — including surfaces needing no credential. */
   it('refuses tools/list, nutrition_lookup and get_meal_plan before any upstream access', async () => {
-    // Authenticated introspection, explicit negative: the ONE outcome mapped to 401.
+    // Authenticated explicit active:false — the one outcome mapped to 401.
     upstream.introspect({ active: false });
 
     const [listToken, lookupToken, mealPlanToken] = revokedGrantTokens;
@@ -104,13 +101,13 @@ describe('a grant the user disconnected', () => {
       expectUnauthorizedChallenge(await send(), `case 5: revoked grant on ${label}`);
     }
 
-    // A 401 from an offline shortcut would pass the assertions above with revocation absent.
+    // Offline shortcut would pass the 401s above with revocation absent.
     expect(
       upstream.callsTo(INTROSPECTION_PATH).length,
       'case 5: live RFC 7662 introspection runs on every request, including tools/list'
     ).toBe(attempts.length);
 
-    // The ordering guarantee as an absence: a revoked grant never reaches a cached credential.
+    // Revoked grant must not reach a cached credential.
     expect(
       upstream.callsTo(TOKEN_EXCHANGE_PATH),
       'case 5: token exchange must not be reached after an inactive grant'
@@ -122,22 +119,20 @@ describe('a grant the user disconnected', () => {
   });
 
   /**
-   * COMPANION TO CASE 5, not one of the ticket's ten. A 401 here would loop every client
-   * through refresh-and-retry during an authorization-server outage.
+   * Companion to case 5: a 401 on AS outage would refresh-loop every client.
    */
   it('does not present an introspection outage as an authentication failure', async () => {
     upstream.introspect({ error: 'server_error' }, 503);
 
     const response = await listTools(server, tokenOfRevokedGrant);
 
-    // First on purpose: "not a 401" is satisfied by a server that never checked anything.
+    // First: "not a 401" alone is satisfied by a server that never checked.
     expect(
       upstream.callsTo(INTROSPECTION_PATH).length,
       'companion to case 5: live introspection must have run before the mapping can be judged'
     ).toBe(1);
 
-    // Denied, not served. Without this a fail-open server that ignores the 503 and serves
-    // tools/list passes: 200 is not 401, and tools/list never exchanges even on success.
+    // Denied, not served — fail-open that ignores 503 and returns 200 also passes "not 401".
     expect(
       response.status,
       `an unresolvable introspection result must deny the request. Got HTTP ${String(response.status)}`
@@ -145,15 +140,13 @@ describe('a grant the user disconnected', () => {
 
     expectNotAnAuthChallenge(response, 'companion to case 5: introspection returned 503');
 
-    // And it still fails closed: the request must not reach exchange or a backing endpoint.
     expect(
       upstream.callsTo(TOKEN_EXCHANGE_PATH),
       'companion to case 5: an unresolvable grant check fails before exchange'
     ).toHaveLength(0);
   });
 
-  /**
-   * The malformed case: a missing `active` member read as truthy is a total bypass. */
+  /** Missing `active` read as truthy is a total bypass. */
   it('fails closed on an introspection response carrying no explicit active result', async () => {
     upstream.introspect({ scope: ALL_SCOPES.join(' '), sub: USER_A });
 

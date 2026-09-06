@@ -64,5 +64,12 @@ export const USER_B = 'user-b-0002';
 export const CLIENT_ID = 'https://client.test/mcp-client.json';
 export const GRANT_A = 'grant-a-1111';
 
+/**
+ * This server's client id (`MCP_CLIENT_ID` / assertion `iss`+`sub`). Not `CLIENT_ID` (assistant
+ * in an inbound token) and not `MCP_RESOURCE_IDENTIFIER` — config refuses if those two match.
+ * Path `/client` differs from the resource's `/mcp` by more than spelling.
+ */
+export const MCP_CLIENT_ID = 'https://mcp.nutrihelp.test/client';
+
 /** Production source of truth for blocked identity fields. */
 export { IDENTITY_DENY_LIST } from '../../src/upstream/client.ts';
