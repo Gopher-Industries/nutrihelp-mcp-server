@@ -312,18 +312,21 @@ describe('a URL-valued variable over cleartext or a non-network scheme', () => {
 });
 
 describe('the backend API URL', () => {
-  it('allows HTTP for local development', () => {
+  it.each([undefined, 'development', 'production'])(
+    'requires HTTPS regardless of NODE_ENV=%s',
+    (nodeEnv) => {
+      set('NODE_ENV', nodeEnv);
+      set('NUTRIHELP_API_BASE_URL', 'http://localhost:8081');
+
+      expect(() => loadConfig()).toThrow(/https/);
+    }
+  );
+
+  it('accepts an HTTPS backend URL regardless of NODE_ENV', () => {
     set('NODE_ENV', 'development');
-    set('NUTRIHELP_API_BASE_URL', 'http://localhost:8081');
+    set('NUTRIHELP_API_BASE_URL', 'https://localhost:8081');
 
-    expect(loadConfig().nutrihelpApiBaseUrl).toBe('http://localhost:8081');
-  });
-
-  it('requires HTTPS in production', () => {
-    set('NODE_ENV', 'production');
-    set('NUTRIHELP_API_BASE_URL', 'http://localhost:8081');
-
-    expect(() => loadConfig()).toThrow(/https.*production/);
+    expect(loadConfig().nutrihelpApiBaseUrl).toBe('https://localhost:8081');
   });
 });
 

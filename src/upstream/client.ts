@@ -201,7 +201,7 @@ export interface UpstreamRequest {
   readonly path: string;
   readonly declaredParameters: readonly string[];
   readonly toolArguments?: Readonly<Record<string, unknown>>;
-  readonly deadlineMs: number | undefined;
+  readonly deadlineMs: number;
   readonly correlationId: string | undefined;
 }
 

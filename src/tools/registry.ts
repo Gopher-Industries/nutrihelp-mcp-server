@@ -10,6 +10,7 @@ import { descriptor as nutritionLookup } from './nutritionLookup.ts';
 
 export interface RegistryConfig {
   readonly nutrihelpApiBaseUrl: string;
+  readonly requestDeadlineMs: number;
 }
 
 export function registerTools(

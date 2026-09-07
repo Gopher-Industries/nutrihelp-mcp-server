@@ -89,11 +89,10 @@ function requiredHttpsUrl(name: string): URL {
 function requiredApiBaseUrl(): string {
   const value = required('NUTRIHELP_API_BASE_URL');
   const url = parseUrl('NUTRIHELP_API_BASE_URL', value);
-  if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
-    throw new Error('NUTRIHELP_API_BASE_URL must use https: in production');
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('NUTRIHELP_API_BASE_URL must use http or https');
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      'NUTRIHELP_API_BASE_URL must use https: over cleartext it can be substituted in transit'
+    );
   }
   return value;
 }

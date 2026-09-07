@@ -57,9 +57,11 @@ const OutputSchema = z.object({
 });
 
 function toNutritionItem(row: Record<string, unknown>): z.infer<typeof NutritionItemSchema> {
-  return NutritionItemSchema.parse(
+  const parsed = NutritionItemSchema.safeParse(
     Object.fromEntries(NUTRITION_FIELDS.map((field) => [field, row[field] ?? null]))
   );
+  if (!parsed.success) throw new RetryableUpstreamError();
+  return parsed.data;
 }
 
 export const contract = {
@@ -70,6 +72,7 @@ export const contract = {
 
 interface NutritionLookupConfig {
   readonly nutrihelpApiBaseUrl: string;
+  readonly requestDeadlineMs: number;
 }
 
 // Extracted Helper: Fetches and parses raw upstream data safely
@@ -83,7 +86,7 @@ async function fetchNutritionData(
       path: '/api/fooddata/search',
       declaredParameters: ['query'],
       toolArguments: { query: food },
-      deadlineMs: undefined,
+      deadlineMs: config.requestDeadlineMs,
       correlationId: undefined,
     });
     if (!response.ok) throw new RetryableUpstreamError();
