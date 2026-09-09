@@ -1,8 +1,11 @@
 /**
  * Environment loading and startup validation.
- * Partial: only the variables needed to boot the transport and verify an inbound token.
+ * Partial: only the variables needed to boot the transport, verify an inbound token, and
+ * introspect the grant behind it.
  * Nothing security-relevant defaults; absent means refuse to start.
  */
+
+import { createPrivateKey, type KeyObject } from 'node:crypto';
 
 export interface ServerConfig {
   readonly port: number;
@@ -28,6 +31,21 @@ export interface ServerConfig {
    * (introspection, audit, exchange, upstream) share this budget — no stage gets a fresh copy.
    */
   readonly requestDeadlineMs: number;
+  /**
+   * This server's client id at the authorization server (`iss`/`sub` of assertions, `act` of
+   * the exchanged credential). Verbatim, never normalised. Distinct from `resourceIdentifier`.
+   */
+  readonly clientId: string;
+  /**
+   * Own credential for `private_key_jwt`. Parsed at startup so a bad key fails boot, not the
+   * first introspection as an outage.
+   */
+  readonly clientAssertionKey: KeyObject;
+  /**
+   * How long an `active: false` may be reused, in ms. Never caches a positive answer; never
+   * permits dispatch. Default 0 means ask every time.
+   */
+  readonly revokedGrantCacheMaxAgeMs: number;
 }
 
 function originToHostname(origin: string): string {
@@ -131,6 +149,21 @@ function requiredResourceIdentifier(name: string): string {
   return url.href;
 }
 
+/**
+ * Scheme-pinned, path-bearing and **verbatim**: the AS compares this string as registered, so
+ * normalising would break `iss`/`sub`. The path keeps it from collapsing into the resource id.
+ */
+function requiredClientIdentifier(name: string): string {
+  const { value, url } = requiredHttps(name);
+  if (url.pathname === '/' || url.pathname === '') {
+    throw new Error(
+      `${name} must carry a path distinguishing it from the resource identifier, for example https://mcp.example/client`
+    );
+  }
+  refuseUnpublishableShape(name, value, url);
+  return value;
+}
+
 /** Scheme-pinned and verbatim, with publishability shape checks. */
 function requiredIssuerIdentifier(name: string): string {
   const { value, url } = requiredHttps(name);
@@ -163,6 +196,50 @@ const MIN_JWKS_CACHE_TTL_S = 60;
 /** Ten minutes. Longer is a hung request, not a slow backend. */
 const MAX_REQUEST_DEADLINE_MS = 600_000;
 
+/**
+ * Five minutes. A revoked grant that keeps being refused for longer than this is no longer
+ * blunting abuse, it is a stale denial nobody can clear without a restart.
+ */
+const MAX_REVOKED_GRANT_CACHE_TTL_S = 300;
+
+/**
+ * A bounded whole number that may be absent, unlike `requiredWholeNumber`. Only for values where
+ * absence is a real choice rather than a missing decision — an empty string is treated as absent
+ * so a blank service-environment entry does not fail startup on a knob that has a safe default.
+ */
+function optionalWholeNumber(name: string, min: number, max: number, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = /^\d+$/.test(raw.trim()) ? Number.parseInt(raw.trim(), 10) : Number.NaN;
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(
+      `${name} must be a base-10 integer between ${String(min)} and ${String(max)}, or be unset`
+    );
+  }
+  return value;
+}
+
+/**
+ * Parse PEM at startup. Asymmetric only: `private_key_jwt` is verified against a published
+ * public key. A symmetric secret is the wrong credential shape for this variable.
+ */
+function requiredPrivateKey(name: string): KeyObject {
+  const raw = required(name);
+  let key: KeyObject;
+  try {
+    key = createPrivateKey(raw);
+  } catch {
+    throw new Error(
+      `${name} is not a readable private key. Supply a PKCS#8 PEM. The value is this server's ` +
+        'own credential, not a platform secret, and it is never logged.'
+    );
+  }
+  if (key.asymmetricKeyType === undefined) {
+    throw new Error(`${name} must be an asymmetric private key, so the issuer can verify it.`);
+  }
+  return key;
+}
+
 export function loadConfig(): ServerConfig {
   const port = requiredWholeNumber('PORT', 1, 65535);
 
@@ -179,6 +256,21 @@ export function loadConfig(): ServerConfig {
     ...new Set(allowedOrigins.map((origin) => originToHostname(origin))),
   ];
 
+  const resourceIdentifier = requiredResourceIdentifier('MCP_RESOURCE_IDENTIFIER');
+  const clientId = requiredClientIdentifier('MCP_CLIENT_ID');
+
+  // Resource is stored normalised, client verbatim — so case-only twins name one registration
+  // as different strings. Compare via URL.href (the discriminating check); raw equality is
+  // defence in depth if resource ever stops being normalised.
+  if (
+    clientId === resourceIdentifier ||
+    new URL(clientId).href === new URL(resourceIdentifier).href
+  ) {
+    throw new Error(
+      'MCP_CLIENT_ID must differ from MCP_RESOURCE_IDENTIFIER: resource and client are separate registrations at the authorization server'
+    );
+  }
+
   return {
     port,
     allowedOriginHostnames,
@@ -186,10 +278,15 @@ export function loadConfig(): ServerConfig {
     jwksUrl: requiredHttpsUrl('MCP_JWKS_URL'),
     expectedIssuer: requiredHttpsVerbatim('MCP_EXPECTED_ISSUER'),
     authServerUrl: requiredIssuerIdentifier('MCP_AUTH_SERVER_URL'),
-    resourceIdentifier: requiredResourceIdentifier('MCP_RESOURCE_IDENTIFIER'),
+    resourceIdentifier,
+    clientId,
     jwksCacheMaxAgeMs:
       requiredWholeNumber('MCP_JWKS_CACHE_TTL_S', MIN_JWKS_CACHE_TTL_S, MAX_JWKS_CACHE_TTL_S) *
       1000,
     requestDeadlineMs: requiredWholeNumber('MCP_REQUEST_DEADLINE_MS', 1, MAX_REQUEST_DEADLINE_MS),
+    clientAssertionKey: requiredPrivateKey('MCP_CLIENT_ASSERTION_KEY'),
+    revokedGrantCacheMaxAgeMs:
+      optionalWholeNumber('MCP_REVOKED_GRANT_CACHE_TTL_S', 0, MAX_REVOKED_GRANT_CACHE_TTL_S, 0) *
+      1000,
   };
 }

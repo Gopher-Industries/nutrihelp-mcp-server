@@ -5,6 +5,7 @@
 
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { generateKeyPairSync } from 'node:crypto';
 import { Agent, request } from 'undici';
 import { McpServer } from '@modelcontextprotocol/server';
 import {
@@ -12,16 +13,36 @@ import {
   CLIENT_INFO_META_KEY,
   PROTOCOL_VERSION_META_KEY,
 } from '@modelcontextprotocol/server';
-import { createHttpApp, type MissingScopeResolver } from '../../src/transport/http.ts';
+import {
+  createHttpApp,
+  type MissingScopeResolver,
+  type RevocationDisabled,
+} from '../../src/transport/http.ts';
 import { protectedResourceMetadata } from '../../src/auth/metadata.ts';
 import { createTokenValidator, type KeySetFetch } from '../../src/auth/tokenValidator.ts';
 import {
+  createRevocationChecker,
+  type ActiveGrant,
+  type IntrospectionRequest,
+  type OperationalEvent,
+  type RevocationChecker,
+  type SecurityEvent,
+} from '../../src/auth/revocation.ts';
+import {
+  ALL_SCOPES,
   ALLOWED_ORIGIN,
   ALLOWED_ORIGIN_HOSTNAMES,
+  AUTH_SERVER_ORIGIN,
+  CLIENT_ID,
+  GRANT_A,
+  INTROSPECTION_PATH,
+  MCP_CLIENT_ID,
   MCP_EXPECTED_ISSUER,
   MCP_AUTH_SERVER_URL,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
+  RESOURCE_METADATA_URL,
+  USER_A,
 } from './testEnv.ts';
 
 /** The one revision this server speaks. Selected explicitly, not negotiated. */
@@ -41,8 +62,23 @@ const REQUEST_ENVELOPE: Record<string, unknown> = {
 export interface TestServer {
   readonly origin: string;
   readonly errors: readonly Error[];
+  /**
+   * Live-introspection requests in order, whatever checker is wired — so a quiet stop asking goes red.
+   */
+  readonly introspections: readonly IntrospectionRequest[];
+  /** What a `'live'` checker reported on its two channels. Empty for the default fake. */
+  readonly revocationEvents: readonly (OperationalEvent | SecurityEvent)[];
   close(): Promise<void>;
 }
+
+/**
+ * How the fixture supplies the required `revocation` field.
+ *
+ * - omitted — in-process "active" (ordering still exercised; no route to register).
+ * - `'live'` — production checker at the mocked introspection endpoint.
+ * - a checker or the named opt-out — supplied verbatim.
+ */
+export type RevocationFixture = RevocationChecker | RevocationDisabled | 'live';
 
 export interface TestServerOptions {
   /** Only way to reach the 403 branch until a tool-to-scope map exists. */
@@ -53,6 +89,8 @@ export interface TestServerOptions {
   readonly requestDeadlineMs?: number;
   /** Absent by default so cases go through the egress door that MockAgent intercepts. */
   readonly keySetFetch?: KeySetFetch;
+  /** See `RevocationFixture`. Defaults to an in-process checker that answers "active". */
+  readonly revocation?: RevocationFixture;
 }
 
 /** The fixture's key-set lifetime. Long enough that no case refetches unless it means to. */
@@ -61,14 +99,87 @@ const FIXTURE_JWKS_CACHE_MAX_AGE_MS = 300_000;
 /** The fixture's request budget. Generous, so only a case that sets its own can reach the deadline. */
 const FIXTURE_REQUEST_DEADLINE_MS = 30_000;
 
+/** Where a `'live'` checker introspects. Same origin the JWKS is served from, and mocked. */
+export const INTROSPECTION_URL = `${AUTH_SERVER_ORIGIN}${INTROSPECTION_PATH}`;
+
 /**
- * Start the transport exactly as `src/server.ts` composes it — including the authorization
- * wiring, which is the whole point: a fixture that omits it drives an endpoint that authorizes
- * nothing, and every rejection case below then passes or fails for the wrong reason.
+ * Fixture client-assertion key: generated per run, never committed. EC — `clientAssertion` pins ES256.
+ */
+const FIXTURE_CLIENT_ASSERTION_KEY = generateKeyPairSync('ec', {
+  namedCurve: 'P-256',
+}).privateKey;
+
+/** Grant shape returned by the default always-active checker. */
+const FIXTURE_ACTIVE_GRANT: ActiveGrant = {
+  grantId: GRANT_A,
+  scopes: ALL_SCOPES,
+  subject: USER_A,
+  clientId: CLIENT_ID,
+};
+
+/**
+ * Narrow on the checker, not the sentinel — same excess-property trap as the transport: a union
+ * admits any property from any member, so asking for the sentinel would diverge from production.
+ */
+function checksRevocation(
+  fixture: RevocationChecker | RevocationDisabled
+): fixture is RevocationChecker {
+  return 'assertGrantActive' in fixture;
+}
+
+/**
+ * Resolve the fixture into the transport field, recording every call so cases can assert
+ * introspection ran without caring which checker answered.
+ */
+function resolveRevocation(
+  fixture: RevocationFixture,
+  introspections: IntrospectionRequest[],
+  events: (OperationalEvent | SecurityEvent)[]
+): RevocationChecker | RevocationDisabled {
+  let checker: RevocationChecker;
+  if (fixture === 'live') {
+    checker = createRevocationChecker({
+      introspectionUrl: INTROSPECTION_URL,
+      clientId: MCP_CLIENT_ID,
+      clientAssertionKey: FIXTURE_CLIENT_ASSERTION_KEY,
+      resourceMetadataUrl: RESOURCE_METADATA_URL,
+      // TTL 0: never reuse a refusal across cases (would under-count introspections).
+      negativeCacheMaxAgeMs: 0,
+      now: () => Date.now(),
+      logOperational: (event: OperationalEvent) => {
+        events.push(event);
+      },
+      logSecurity: (event: SecurityEvent) => {
+        events.push(event);
+      },
+    });
+  } else if (checksRevocation(fixture)) {
+    checker = fixture;
+  } else {
+    // The named opt-out, and only after the checker question was asked first.
+    return fixture;
+  }
+
+  return {
+    assertGrantActive: (introspection: IntrospectionRequest): Promise<ActiveGrant> => {
+      introspections.push(introspection);
+      return checker.assertGrantActive(introspection);
+    },
+  };
+}
+
+/** The default: every request is introspected, and the answer is always "active". */
+const ALWAYS_ACTIVE: RevocationChecker = {
+  assertGrantActive: (): Promise<ActiveGrant> => Promise.resolve(FIXTURE_ACTIVE_GRANT),
+};
+
+/**
+ * Start the transport as `src/server.ts` composes it — including authorization. Omitting that
+ * wiring makes every rejection case pass or fail for the wrong reason.
  *
- * `revocation` and the registry are still absent, so the order this exercises stops at the scope
- * check. When they land they are wired here, and every test goes through this one factory so that
- * they cannot silently diverge from production wiring.
+ * Live introspection is wired for **every** case (default always-active), matching the required
+ * field in production — defaulting to the opt-out would reintroduce that omission in tests.
+ * Registry still absent; order stops at the scope check.
  */
 export async function startTestServer(
   optionsOrConfigure: TestServerOptions | ((server: McpServer) => void) = {}
@@ -76,6 +187,8 @@ export async function startTestServer(
   const options = typeof optionsOrConfigure === 'function' ? {} : optionsOrConfigure;
   const configureServer = typeof optionsOrConfigure === 'function' ? optionsOrConfigure : undefined;
   const errors: Error[] = [];
+  const introspections: IntrospectionRequest[] = [];
+  const revocationEvents: (OperationalEvent | SecurityEvent)[] = [];
   const app = createHttpApp({
     factory: () => {
       options.onDispatch?.();
@@ -100,6 +213,13 @@ export async function startTestServer(
         requestDeadlineMs: options.requestDeadlineMs ?? FIXTURE_REQUEST_DEADLINE_MS,
         ...(options.keySetFetch === undefined ? {} : { keySetFetch: options.keySetFetch }),
       }),
+      revocation: resolveRevocation(
+        options.revocation ?? ALWAYS_ACTIVE,
+        introspections,
+        revocationEvents
+      ),
+      // One budget, shared with the validator above (as the composition root shares it).
+      requestDeadlineMs: options.requestDeadlineMs ?? FIXTURE_REQUEST_DEADLINE_MS,
       ...(options.missingScopeFor === undefined
         ? {}
         : { missingScopeFor: options.missingScopeFor }),
@@ -120,6 +240,8 @@ export async function startTestServer(
   return {
     origin: `http://127.0.0.1:${String(address.port)}`,
     errors,
+    introspections,
+    revocationEvents,
     async close(): Promise<void> {
       server.closeAllConnections();
       await new Promise<void>((resolve) => {

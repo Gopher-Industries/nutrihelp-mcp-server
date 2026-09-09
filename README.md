@@ -9,16 +9,19 @@ logic.
 
 Early. The transport is real and the rest is not yet built.
 
-| Area                                | State                                                           |
-| ----------------------------------- | --------------------------------------------------------------- |
-| `/mcp` endpoint                     | Reachable. Protocol revision `2026-07-28` selected exclusively. |
-| Origin validation                   | Enforced against an explicit allowlist.                         |
-| Tools                               | **None registered.** `tools/list` returns `-32601`.             |
-| Authentication                      | **Not implemented.** No token is validated yet.                 |
-| Lint, format, test, coverage, hooks | Installed. `npm run validate` runs them.                        |
+| Area                                | State                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------- |
+| `/mcp` endpoint                     | Reachable. Protocol revision `2026-07-28` selected exclusively.                       |
+| Origin validation                   | Enforced against an explicit allowlist.                                               |
+| Tools                               | **None registered.** `tools/list` returns `-32601`.                                   |
+| Authentication                      | Token validated offline against JWKS, then live grant introspection on every request. |
+| Lint, format, test, coverage, hooks | Installed. `npm run validate` runs them.                                              |
 
-Because no tool is registered and no authentication runs, this service currently exposes no
-NutriHelp data. Do not deploy it publicly in this state.
+Because no tool is registered, this service currently exposes no NutriHelp data. Do not deploy it
+publicly in this state.
+
+Authentication is wired but **not yet operable**: introspection calls an authorization server that
+does not exist yet and fails closed, so every request is refused until that endpoint ships.
 
 ## Requirements
 
@@ -44,8 +47,10 @@ disable it.
 Configuration is validated at startup and the process refuses to start on a missing or malformed
 value. Nothing security-relevant defaults.
 
-Two variables are read today, because they are the only two the transport needs:
+Eleven variables are read today. Ten are required, and a missing one stops the process at startup
+rather than being filled in.
 
+<<<<<<< HEAD
 | Variable                  | Required | Description                                                                      |
 | ------------------------- | -------- | -------------------------------------------------------------------------------- |
 | `PORT`                    | Yes      | The port to listen on. Render injects it.                                        |
@@ -56,9 +61,29 @@ Two variables are read today, because they are the only two the transport needs:
 | `MCP_RESOURCE_IDENTIFIER` | Yes      | HTTPS MCP resource identifier, including its path.                               |
 | `MCP_JWKS_CACHE_TTL_S`    | Yes      | JWKS cache lifetime in seconds, from 60 to 86400.                                |
 | `MCP_REQUEST_DEADLINE_MS` | Yes      | End-to-end MCP request deadline in milliseconds.                                 |
+=======
+| Variable                        | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                          | Yes      | The port to listen on. Render injects it.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `MCP_ALLOWED_ORIGINS`           | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard.                                                                                                                                                                                                                                                                                                                                                                 |
+| `MCP_JWKS_URL`                  | Yes      | Where verification keys are fetched from. `https:` only, with no exemption for loopback.                                                                                                                                                                                                                                                                                                                                                         |
+| `MCP_EXPECTED_ISSUER`           | Yes      | The `iss` claim a token must carry. Stored verbatim — it is compared byte for byte.                                                                                                                                                                                                                                                                                                                                                              |
+| `MCP_AUTH_SERVER_URL`           | Yes      | The authorization server named in this server's public metadata. No userinfo, query or fragment.                                                                                                                                                                                                                                                                                                                                                 |
+| `MCP_RESOURCE_IDENTIFIER`       | Yes      | This server's canonical identifier including its path. Also the expected audience.                                                                                                                                                                                                                                                                                                                                                               |
+| `MCP_JWKS_CACHE_TTL_S`          | Yes      | How long a fetched key set may be reused, in seconds. Between 60 and 86400.                                                                                                                                                                                                                                                                                                                                                                      |
+| `MCP_REQUEST_DEADLINE_MS`       | Yes      | The end-to-end deadline for one request, in milliseconds. Not a per-call timeout. At most 600000.                                                                                                                                                                                                                                                                                                                                                |
+| `MCP_CLIENT_ID`                 | Yes      | This server's own client identifier at the authorization server — `iss` and `sub` of every client assertion. An `https:` URL with a **non-empty path**, and it **must differ from `MCP_RESOURCE_IDENTIFIER`**: resource and client are separate registrations there, and the process refuses to start if the two match. Stored verbatim, never normalised, because the authorization server compares it as a string against what was registered. |
+| `MCP_CLIENT_ASSERTION_KEY`      | Yes      | This server's own private key, PKCS#8 PEM, for `private_key_jwt` at the introspection and exchange endpoints. Parsed at startup, so an unreadable key stops the process instead of surfacing as an outage on the first request. Asymmetric only.                                                                                                                                                                                                 |
+| `MCP_REVOKED_GRANT_CACHE_TTL_S` | No       | How long an already-inactive grant may be refused from cache, in seconds. Up to 300; **defaults to 0**, meaning ask every time. It never caches an active answer and never permits a call, so it can only ever refuse faster.                                                                                                                                                                                                                    |
+>>>>>>> origin/main
 
 `MCP_ALLOWED_ORIGINS` entries are parsed as URLs and reduced to hostnames; the guard is
 port-agnostic. A malformed entry fails startup rather than being skipped.
+
+`MCP_CLIENT_ID` and `MCP_CLIENT_ASSERTION_KEY` are the pair used for `private_key_jwt` on every
+live introspection (between token validation and scope). The key is this server's own credential,
+never logged. **Both must be registered at the authorization server** before this server can serve
+a request; an unreachable or unrecognised client fails closed rather than serving unchecked.
 
 The full set of variables the finished service takes is fixed by the implementation plan and is
 added as each module lands. `JWT_TOKEN`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` are absent by

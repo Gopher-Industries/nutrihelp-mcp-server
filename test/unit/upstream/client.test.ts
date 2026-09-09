@@ -3,7 +3,9 @@ import {
   CORRELATION_ID_HEADER,
   fetchUpstream,
   IDENTITY_DENY_LIST,
+  postFormWithoutCredential,
   selectDeclaredToolParameters,
+  type FormPostOptions,
 } from '../../../src/upstream/client.ts';
 import { expectWireCallsSince } from '../../support/assertions.ts';
 import {
@@ -14,6 +16,7 @@ import {
 import { NUTRIHELP_API_ORIGIN } from '../../support/testEnv.ts';
 
 const PROBE_PATH = '/api/ticket-28-probe';
+const FORM_PROBE_PATH = '/api/ticket-59-form-probe';
 const SMUGGLED_IDENTITY = 'SMUGGLED-IDENTITY-c0ffee';
 
 /** Hand-written pin — must not derive from `IDENTITY_DENY_LIST`. */
@@ -52,6 +55,12 @@ beforeEach(() => {
   upstream = installUpstreamMock([]);
   upstream.route({
     path: new RegExp(`^${PROBE_PATH}(\\?.*)?$`),
+    status: 200,
+    body: { ok: true },
+  });
+  upstream.route({
+    path: FORM_PROBE_PATH,
+    method: 'POST',
     status: 200,
     body: { ok: true },
   });
@@ -301,5 +310,164 @@ describe('Ticket 28 outbound identity boundary', () => {
 
     expectWireCallsSince(upstream.callsTo(PROBE_PATH), before, 'the request must still be sent');
     expect(timeout).toHaveBeenCalledWith(5_000);
+  });
+});
+
+/**
+ * Ticket 59 form POST for auth-server endpoints. No `Authorization` header (`private_key_jwt`
+ * in the body). Refuses identity fields loudly rather than stripping them.
+ */
+describe('the unauthenticated form POST', () => {
+  it('sends a form-encoded body with the correlation id and no credential header', async () => {
+    const before = upstream.callsTo(FORM_PROBE_PATH).length;
+
+    await postFormWithoutCredential({
+      url: `${NUTRIHELP_API_ORIGIN}${FORM_PROBE_PATH}`,
+      form: { token: 'token-value.with.dots', token_type_hint: 'access_token' },
+      deadlineMs: 5_000,
+      correlationId: 'form-post-test',
+      redirect: 'error',
+    });
+
+    const calls = expectWireCallsSince(
+      upstream.callsTo(FORM_PROBE_PATH),
+      before,
+      'the form POST must reach the wire'
+    );
+
+    for (const call of calls) {
+      expect(call.method).toBe('POST');
+
+      const sent = new Map(
+        Object.entries(call.headers).map(([name, value]) => [
+          name.toLowerCase(),
+          Array.isArray(value) ? value.join(', ') : value,
+        ])
+      );
+      expect(sent.get('content-type')).toContain('application/x-www-form-urlencoded');
+      expect(sent.get(CORRELATION_ID_HEADER)).toBe('form-post-test');
+      expect(
+        sent.get('authorization'),
+        'the authorization-server endpoints authenticate this server by the assertion in the body'
+      ).toBeUndefined();
+      expect(sent.get('cookie')).toBeUndefined();
+
+      const form = new URLSearchParams(call.body);
+      expect(form.get('token')).toBe('token-value.with.dots');
+      expect(form.get('token_type_hint')).toBe('access_token');
+      expect([...form.keys()].sort(), 'the body is exactly what the caller named').toEqual([
+        'token',
+        'token_type_hint',
+      ]);
+      expect(call.searchParams, 'nothing is smuggled into the query string').toEqual({});
+    }
+  });
+
+  it('refuses every blocked identity spelling before anything is sent', async () => {
+    for (const field of BLOCKED_TEST_FIELDS) {
+      const before = upstream.wireCalls().length;
+
+      await expect(
+        postFormWithoutCredential({
+          url: `${NUTRIHELP_API_ORIGIN}${FORM_PROBE_PATH}`,
+          form: { token: 'token-value', [field]: SMUGGLED_IDENTITY },
+          deadlineMs: 5_000,
+          correlationId: 'form-identity-test',
+          redirect: 'error',
+        }),
+        `${field} must fail loudly here rather than being stripped in silence`
+      ).rejects.toThrow(TypeError);
+
+      expect(
+        upstream.wireCalls().length,
+        `${field}: the refusal happens before the request, so nothing reaches the wire at all`
+      ).toBe(before);
+    }
+  });
+
+  /**
+   * No unbounded form of this call. Table pins values a caller can pass; absent deadline is
+   * refused by the type, not listed here. Key-set GET keeps its own optional-deadline contract.
+   */
+  const UNUSABLE_DEADLINES = [
+    0,
+    -1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ] as const;
+
+  it('has more than one unusable shape, and the table is not empty', () => {
+    expect(
+      UNUSABLE_DEADLINES.length,
+      'emptying this table would delete every deadline refusal in silence'
+    ).toBeGreaterThanOrEqual(5);
+  });
+
+  it.each(UNUSABLE_DEADLINES)(
+    'refuses the deadline %p before reaching the wire',
+    async (deadlineMs) => {
+      const before = upstream.wireCalls().length;
+
+      const attempt = postFormWithoutCredential({
+        url: `${NUTRIHELP_API_ORIGIN}${FORM_PROBE_PATH}`,
+        form: { token: 'token-value' },
+        deadlineMs,
+        correlationId: 'form-deadline-test',
+        redirect: 'error',
+      });
+
+      await expect(attempt).rejects.toThrow(TypeError);
+      await expect(
+        attempt,
+        'refused by the guard that has no absent-deadline arm, not by the one that does'
+      ).rejects.toThrow('Authorization-server calls require a positive finite deadline');
+
+      expect(
+        upstream.wireCalls().length,
+        `deadlineMs=${String(deadlineMs)}: an authorization-server call that cannot be bounded reaches no endpoint at all`
+      ).toBe(before);
+    }
+  );
+
+  /**
+   * Positive control for the table above. Without it, "nothing reached the wire" also passes
+   * against a helper that never sends.
+   */
+  it('applies a usable caller deadline to the request it sends', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const before = upstream.wireCalls().length;
+
+    await postFormWithoutCredential({
+      url: `${NUTRIHELP_API_ORIGIN}${FORM_PROBE_PATH}`,
+      form: { token: 'token-value' },
+      deadlineMs: 1_500,
+      correlationId: 'form-deadline-applied-test',
+      redirect: 'error',
+    });
+
+    expectWireCallsSince(
+      upstream.callsTo(FORM_PROBE_PATH),
+      before,
+      'a usable deadline sends the request, so the refusals above are refusals rather than a helper that never sends'
+    );
+    expect(timeout, 'the remaining request budget is what bounds this call').toHaveBeenCalledWith(
+      1_500
+    );
+  });
+
+  /**
+   * Compile-level pin: if `deadlineMs` widens to `number | undefined`, this resolves to `never`
+   * and typecheck fails. Runtime tables cannot reach an unexpressible value.
+   */
+  type DeadlineIsRequired = undefined extends FormPostOptions['deadlineMs'] ? never : true;
+
+  it('cannot express an absent deadline at all', () => {
+    const deadlineIsRequired: DeadlineIsRequired = true;
+
+    expect(
+      deadlineIsRequired,
+      'the real assertion is the type above; this keeps the pin visible in the run'
+    ).toBe(true);
   });
 });
