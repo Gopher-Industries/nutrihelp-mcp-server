@@ -296,7 +296,7 @@ describe('Ticket 28 outbound identity boundary', () => {
     }
   });
 
-  it('still permits an explicitly absent deadline', async () => {
+  it('requires and applies an explicit request deadline', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     const before = upstream.callsTo(PROBE_PATH).length;
 
@@ -304,12 +304,12 @@ describe('Ticket 28 outbound identity boundary', () => {
       baseUrl: NUTRIHELP_API_ORIGIN,
       path: PROBE_PATH,
       declaredParameters: [],
-      deadlineMs: undefined,
-      correlationId: 'absent-deadline-test',
+      deadlineMs: 5_000,
+      correlationId: 'required-deadline-test',
     });
 
     expectWireCallsSince(upstream.callsTo(PROBE_PATH), before, 'the request must still be sent');
-    expect(timeout).not.toHaveBeenCalled();
+    expect(timeout).toHaveBeenCalledWith(5_000);
   });
 });
 

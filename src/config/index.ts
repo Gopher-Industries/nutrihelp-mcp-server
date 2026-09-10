@@ -11,6 +11,7 @@ export interface ServerConfig {
   readonly port: number;
   /** Hostnames only — the Origin guard is port-agnostic. */
   readonly allowedOriginHostnames: readonly string[];
+  readonly nutrihelpApiBaseUrl: string;
   readonly jwksUrl: URL;
   readonly expectedIssuer: string;
   /** Authorization server issuer, published verbatim in metadata. */
@@ -101,6 +102,17 @@ function requiredHttpsVerbatim(name: string): string {
 
 function requiredHttpsUrl(name: string): URL {
   return requiredHttps(name).url;
+}
+
+function requiredApiBaseUrl(): string {
+  const value = required('NUTRIHELP_API_BASE_URL');
+  const url = parseUrl('NUTRIHELP_API_BASE_URL', value);
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      'NUTRIHELP_API_BASE_URL must use https: over cleartext it can be substituted in transit'
+    );
+  }
+  return value;
 }
 
 /** Shape refusals for values published in metadata. Shared so normalisation stays a separate choice. */
@@ -262,6 +274,7 @@ export function loadConfig(): ServerConfig {
   return {
     port,
     allowedOriginHostnames,
+    nutrihelpApiBaseUrl: requiredApiBaseUrl(),
     jwksUrl: requiredHttpsUrl('MCP_JWKS_URL'),
     expectedIssuer: requiredHttpsVerbatim('MCP_EXPECTED_ISSUER'),
     authServerUrl: requiredIssuerIdentifier('MCP_AUTH_SERVER_URL'),

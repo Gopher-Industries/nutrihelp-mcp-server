@@ -15,6 +15,7 @@ import {
   MCP_CLIENT_ID,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
+  NUTRIHELP_API_BASE_URL,
 } from '../../support/testEnv.ts';
 
 /** Every variable this module requires. The list is the subject of the first test below: a
@@ -28,6 +29,7 @@ const REQUIRED_VARS = [
   'MCP_RESOURCE_IDENTIFIER',
   'MCP_JWKS_CACHE_TTL_S',
   'MCP_REQUEST_DEADLINE_MS',
+  'NUTRIHELP_API_BASE_URL',
   'MCP_CLIENT_ID',
   'MCP_CLIENT_ASSERTION_KEY',
 ] as const;
@@ -53,6 +55,7 @@ const VALID: Record<RequiredVar, string> = {
   MCP_RESOURCE_IDENTIFIER: MCP_RESOURCE_IDENTIFIER,
   MCP_JWKS_CACHE_TTL_S: '600',
   MCP_REQUEST_DEADLINE_MS: '30000',
+  NUTRIHELP_API_BASE_URL,
   MCP_CLIENT_ID: MCP_CLIENT_ID,
   MCP_CLIENT_ASSERTION_KEY: CLIENT_ASSERTION_KEY_PEM,
 };
@@ -223,6 +226,7 @@ describe('the complete valid configuration', () => {
 
     expect(config.port).toBe(3000);
     expect(config.allowedOriginHostnames).toEqual(['claude.ai']);
+    expect(config.nutrihelpApiBaseUrl).toBe(NUTRIHELP_API_BASE_URL);
     expect(config.jwksUrl.href).toBe(MCP_JWKS_URL);
     expect(config.expectedIssuer).toBe(MCP_EXPECTED_ISSUER);
     expect(config.authServerUrl).toBe(MCP_AUTH_SERVER_URL);
@@ -257,7 +261,7 @@ describe('a required variable that is absent or blank', () => {
     expect(
       () => loadConfig(),
       `${name} has no default and no safe fallback: a server that boots without it accepts something it cannot check`
-    ).toThrow(/PORT|MCP_/);
+    ).toThrow(/PORT|MCP_|NUTRIHELP_/);
   });
 
   it.each(REQUIRED_VARS)('names %s in the failure, so an operator knows which one', (name) => {
@@ -331,6 +335,25 @@ describe('a URL-valued variable over cleartext or a non-network scheme', () => {
   it('keeps a floor under the refused-scheme table', () => {
     expect(REFUSED_SCHEMES.length).toBeGreaterThanOrEqual(3);
     expect(URL_VARS.length).toBe(4);
+  });
+});
+
+describe('the backend API URL', () => {
+  it.each([undefined, 'development', 'production'])(
+    'requires HTTPS regardless of NODE_ENV=%s',
+    (nodeEnv) => {
+      set('NODE_ENV', nodeEnv);
+      set('NUTRIHELP_API_BASE_URL', 'http://localhost:8081');
+
+      expect(() => loadConfig()).toThrow(/https/);
+    }
+  );
+
+  it('accepts an HTTPS backend URL regardless of NODE_ENV', () => {
+    set('NODE_ENV', 'development');
+    set('NUTRIHELP_API_BASE_URL', 'https://localhost:8081');
+
+    expect(loadConfig().nutrihelpApiBaseUrl).toBe('https://localhost:8081');
   });
 });
 

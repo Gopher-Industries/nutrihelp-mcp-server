@@ -181,14 +181,20 @@ const ALWAYS_ACTIVE: RevocationChecker = {
  * field in production — defaulting to the opt-out would reintroduce that omission in tests.
  * Registry still absent; order stops at the scope check.
  */
-export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
+export async function startTestServer(
+  optionsOrConfigure: TestServerOptions | ((server: McpServer) => void) = {}
+): Promise<TestServer> {
+  const options = typeof optionsOrConfigure === 'function' ? {} : optionsOrConfigure;
+  const configureServer = typeof optionsOrConfigure === 'function' ? optionsOrConfigure : undefined;
   const errors: Error[] = [];
   const introspections: IntrospectionRequest[] = [];
   const revocationEvents: (OperationalEvent | SecurityEvent)[] = [];
   const app = createHttpApp({
     factory: () => {
       options.onDispatch?.();
-      return new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+      const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+      configureServer?.(server);
+      return server;
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
     // Production generator, not a hand-written fixture.

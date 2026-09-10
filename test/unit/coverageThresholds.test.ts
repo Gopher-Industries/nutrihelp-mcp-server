@@ -365,17 +365,4 @@ describe('the coverage branch bars over the gated directories', () => {
   it('emits the one report format the doc set tells everyone to read', () => {
     expect(declaredReporters()).toContain('json-summary');
   });
-
-  /**
-   * `src/tools` is gated by policy and carries a declared bar, but holds no source, so the cases
-   * above cannot prove that bar wired — they can only pass over it. What is asserted instead is the
-   * fact that makes it inert, so this case turns red on the day the directory appears, which is the
-   * day the bar becomes provable.
-   */
-  it('carries no tool source yet, so the bar declared over them is pinned rather than proven', () => {
-    expect(
-      sourcesUnder('src/tools'),
-      'a source landed under src/tools. The cases above now pick it up on their own, so its declared bar is being asserted as wired for the first time: prove it FIRES by dropping a branch there below the bar and confirming the coverage command exits non-zero, then delete this case'
-    ).toEqual([]);
-  });
 });

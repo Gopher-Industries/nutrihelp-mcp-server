@@ -9,6 +9,7 @@ import { protectedResourceMetadataUrl } from './auth/challenge.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createRevocationChecker } from './auth/revocation.ts';
 import { createHttpApp } from './transport/http.ts';
+import { registerTools } from './tools/registry.ts';
 
 const config = loadConfig();
 
@@ -45,11 +46,16 @@ const revocationChecker = createRevocationChecker({
 });
 
 const app = createHttpApp({
-  factory: () =>
-    new McpServer({
+  factory: (ctx) => {
+    const server = new McpServer({
       name: 'nutrihelp-mcp-server',
       version: '1.0.0',
-    }),
+    });
+
+    registerTools(server, ctx, config);
+
+    return server;
+  },
   allowedOriginHostnames: config.allowedOriginHostnames,
   resourceMetadata: protectedResourceMetadata({
     resourceIdentifier: config.resourceIdentifier,
@@ -65,7 +71,6 @@ const app = createHttpApp({
     console.error(JSON.stringify({ level: 'error', msg: error.message }));
   },
 });
-
 app.listen(config.port, () => {
   console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
 });

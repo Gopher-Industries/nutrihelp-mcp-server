@@ -1,6 +1,4 @@
-/**
- * The only module permitted to make an outbound HTTP call.
- *
+/** The single point through which every outbound call to the NutriHelp backend passes.
  * Supports unauthenticated GET and declared query assembly with identity filtering.
  * Credential attachment and retry with backoff/jitter remain future work.
  * Do not improvise outbound policy in a caller.
@@ -263,7 +261,7 @@ export interface UpstreamRequest {
   readonly path: string;
   readonly declaredParameters: readonly string[];
   readonly toolArguments?: Readonly<Record<string, unknown>>;
-  readonly deadlineMs: number | undefined;
+  readonly deadlineMs: number;
   readonly correlationId: string | undefined;
 }
 

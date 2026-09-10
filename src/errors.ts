@@ -325,3 +325,17 @@ export class McpError extends Error {
     }
   }
 }
+
+export class RetryableUpstreamError extends McpError {
+  constructor() {
+    super({
+      class: 'upstream_failure',
+      statusClass: '5xx',
+      errorCode: 'nutrition_lookup_failed',
+      endpointClass: 'nutrition_lookup',
+      correlationId: 'unavailable',
+      latencyMs: 0,
+    });
+    this.name = 'RetryableUpstreamError';
+  }
+}

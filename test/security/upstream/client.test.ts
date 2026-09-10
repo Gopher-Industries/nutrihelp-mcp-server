@@ -5,11 +5,12 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * Ticket 28 now supplies query assembly and the authoritative identity deny-list in
- * `src/upstream/client.ts`. The wire-level case remains an executable gate for tickets
- * 26 and 32, whose tools do not exist yet.
+ * WILL PASS WHEN: ticket 28 lands query/body assembly in `src/upstream/client.ts` with the
+ * frozen deny-list, and tickets 26 and 32 land the two tools that drive it.
  */
 
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestKeyPair, makeToken, type TestKeyPair } from '../../../scripts/makeToken.ts';
 import {
@@ -33,9 +34,11 @@ import {
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   MEALPLAN_ME_PATH,
+  NUTRIHELP_API_ORIGIN,
   USER_A,
   USER_B,
 } from '../../support/testEnv.ts';
+import { contract, handler, inputSchema } from '../../../src/tools/nutritionLookup.ts';
 
 /** Distinctive values, so a leak is unambiguous rather than a coincidental substring. */
 const SMUGGLED_VALUE = 'SMUGGLED-USER-B-c0ffee';
@@ -94,7 +97,13 @@ beforeEach(async () => {
       ],
     },
   });
-  server = await startTestServer();
+  server = await startTestServer((mcp) => {
+    mcp.registerTool(
+      'nutrition_lookup',
+      { ...contract, inputSchema },
+      handler({ nutrihelpApiBaseUrl: NUTRIHELP_API_ORIGIN, requestDeadlineMs: 30_000 })
+    );
+  });
 });
 
 afterEach(async () => {
@@ -116,12 +125,43 @@ const DRIVEN_TOOLS = [
 ] as const;
 
 describe('a user identifier smuggled into tool arguments', () => {
-  /** Empty deny-list would vacuously pass the wire loop below; field pin lives in test/unit. */
-  it('is not driving its wire loop over an empty deny-list', () => {
+  /** Direct deny-list check: the wire test below cannot see it because zod strips undeclared keys. */
+  it('declares every required identity field, and is not silently empty', () => {
+    const REQUIRED = [
+      'user_id',
+      'userId',
+      'email',
+      'targetUserId',
+      'targetEmail',
+      'target_user_id',
+      'target_email',
+    ] as const;
+
     expect(
       IDENTITY_DENY_LIST.length,
       'an empty deny-list passes every wire-absence assertion in this file'
     ).toBeGreaterThan(0);
+
+    for (const field of REQUIRED) {
+      expect(
+        IDENTITY_DENY_LIST as readonly string[],
+        `"${field}" is stripped on the way out`
+      ).toContain(field);
+    }
+
+    // Positive control: the static path used for the on-disk source-of-truth check must resolve.
+    const knownModule = fileURLToPath(new URL('../../../src/transport/http.ts', import.meta.url));
+    expect(existsSync(knownModule), 'the path walk used by the guard below must resolve').toBe(
+      true
+    );
+
+    // The real upstream client is the source of truth for the deny-list, so the file must exist.
+    // Swap guard: file existence because a dynamic import won't resolve while the file is absent.
+    const clientModule = fileURLToPath(new URL('../../../src/upstream/client.ts', import.meta.url));
+    expect(
+      existsSync(clientModule),
+      'src/upstream/client.ts must exist and be the source of truth for IDENTITY_DENY_LIST'
+    ).toBe(true);
   });
 
   /**
