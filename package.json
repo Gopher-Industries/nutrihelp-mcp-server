@@ -27,7 +27,9 @@
     "token:test": "node scripts/issueTestToken.ts",
     "inspect": "mcp-inspector --config .dev/inspector.json",
     "validate": "npm run check:node && npm run typecheck && npm run lint && npm run format:check && npm test && npm run conformance && npm run test:controls && npm run security:audit",
-    "prepare": "husky"
+    "prepare": "husky",
+    "test:confirmation": "vitest run test/unit/auth/confirmationArguments.test.ts test/unit/auth/confirmationStore.test.ts test/unit/upstream/keyValue.test.ts",
+    "test:confirmation:redis": "vitest run test/integration/confirmationStore.test.ts"
   },
   "repository": {
     "type": "git",
@@ -43,6 +45,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "@redis/client": "6.2.1",
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
     "jose": "^6.2.8"
