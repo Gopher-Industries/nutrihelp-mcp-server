@@ -41,7 +41,7 @@ const EGRESS_BUILTINS = [
   'inspector',
   'process',
 ];
-const EGRESS_PACKAGES = ['undici', 'axios', 'node-fetch'];
+const EGRESS_PACKAGES = ['undici', 'axios', 'node-fetch', 'redis', '@redis/client'];
 /** Globals that open an outbound connection with no import. Adding one is a security change. */
 const EGRESS_GLOBALS = ['fetch', 'WebSocket', 'EventSource'];
 const BANNED_ESTATE_MIDDLEWARE = ['express-rate-limit', 'cors'];
@@ -121,7 +121,7 @@ const NON_EGRESS_SYNTAX = [
 
 const EGRESS_DYNAMIC_RE =
   `^(node:)?(${EGRESS_BUILTINS.join('|')})(${SLASH}.*)?$` +
-  `|^(${EGRESS_PACKAGES.join('|')})(${SLASH}.*)?$`;
+  `|^(${EGRESS_PACKAGES.map((name) => name.replaceAll('/', SLASH)).join('|')})(${SLASH}.*)?$`;
 
 /** `no-restricted-imports` misses dynamic `import()`; `no-restricted-globals` misses member
  *  access. Without these, `import('node:http')` and `globalThis.fetch` lint clean. */

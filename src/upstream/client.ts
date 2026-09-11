@@ -1,14 +1,83 @@
-/** The single point through which every outbound call to the NutriHelp backend passes.
+/** The single egress module for NutriHelp HTTP and Render Key Value connections.
  * Supports unauthenticated GET and declared query assembly with identity filtering.
  * Credential attachment and retry with backoff/jitter remain future work.
  * Do not improvise outbound policy in a caller.
  */
 
-/**
- * Conventional name until the backend contract pins it. If the caller passes `undefined`, a
- * fresh id is minted — that one does not join the inbound request.
- */
+import { createClient } from '@redis/client';
+
+/** Inbound correlation id, or a freshly minted id when none was supplied. */
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
+
+export interface KeyValueConnection {
+  readonly eval: (
+    script: string,
+    keys: string[],
+    args: string[],
+    timeoutMs: number
+  ) => Promise<unknown>;
+  readonly close: () => void;
+}
+
+/** The Redis socket stays in the same egress module as HTTP. No offline command queue. */
+export async function connectKeyValue(url: string, timeoutMs: number): Promise<KeyValueConnection> {
+  assertUsableDeadline(timeoutMs);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.search || parsed.hash) {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  let client: ReturnType<typeof createClient>;
+  try {
+    client = createClient({
+      url,
+      disableOfflineQueue: true,
+      socket: { connectTimeout: timeoutMs, reconnectStrategy: false },
+    });
+  } catch {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  // Required EventEmitter listener. Command/connect rejections report only a generic failure.
+  client.on('error', () => {
+    // Individual operations reject. Logging this event would expose the Redis URL or command.
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      client.connect(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('Key Value connection timed out'));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch {
+    if (client.isOpen) client.destroy();
+    throw new Error('Key Value connection unavailable');
+  } finally {
+    clearTimeout(timer);
+  }
+  return {
+    async eval(script, keys, args, commandTimeoutMs) {
+      assertUsableDeadline(commandTimeoutMs);
+      try {
+        return await client.withCommandOptions({ timeout: commandTimeoutMs }).eval(script, {
+          keys,
+          arguments: args,
+        });
+      } catch {
+        throw new Error('Key Value command unavailable');
+      }
+    },
+    close() {
+      if (client.isOpen) client.destroy();
+    },
+  };
+}
 
 /** Allowlist: a deny-list of credential names is never complete. */
 const FORWARDABLE_REQUEST_HEADERS = new Set([
