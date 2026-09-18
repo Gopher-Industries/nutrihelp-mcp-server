@@ -48,6 +48,12 @@ export interface RouteSpec {
   readonly body: object | string;
   /** Answer one call only. Routes are registered indefinitely by default. */
   readonly once?: boolean;
+  /**
+   * Hold the reply for this long before sending it. The only way to drive a real abort: the
+   * deadline under test is milliseconds, so the delay is too, and nothing waits on a real clock
+   * beyond the slice itself. Same mechanism the `jwks` outcome already uses.
+   */
+  readonly delayMs?: number;
 }
 
 /**
@@ -169,6 +175,7 @@ export function installUpstreamMock(
       .get(spec.origin ?? NUTRIHELP_API_ORIGIN)
       .intercept({ path: spec.path, method: spec.method ?? 'GET' })
       .reply(spec.status, spec.body, { headers: { 'content-type': 'application/json' } });
+    if (spec.delayMs !== undefined) scope.delay(spec.delayMs);
     if (spec.once !== true) scope.persist();
   }
 

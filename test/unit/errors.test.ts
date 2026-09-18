@@ -1,11 +1,8 @@
 /**
- * Taxonomy suite, written from the plan. Assertions match constructor *values*, not payload
- * key names, except the construction-surface block, which is a proposal (the plan does not fix
- * the constructor signature).
- *
- * Presence uses `carriesExactly` (no prefix/suffix matches). Absence uses `textIncludes` (loose
- * is stronger). `LOG_ONLY_SENTINELS` pins declared log-side fields so a model leak of a legitimate
- * slot cannot pass as "no extras".
+ * Taxonomy suite. Constructor values are pinned, not payload key names, except
+ * `confirmation_token`, `summary`, `unresolved_items`, and `status`.
+ * Presence: `carriesExactly`. Absence: `textIncludes`. `LOG_ONLY_SENTINELS` pins log-only
+ * fields so a model leak of a legitimate slot cannot pass as "no extras".
  */
 
 import { readFileSync } from 'node:fs';
@@ -73,7 +70,9 @@ const FORBIDDEN_EXTRAS: Record<string, unknown> = {
   details: FORBIDDEN.responseBody,
 };
 
-/* Construction surface — proposed, not pinned. Change these builders if the signature changes. */
+const EXPECTED_FORBIDDEN_EXTRA_COUNT = 8;
+
+/* Construction surface: proposed, not pinned. */
 
 type ErrorInit = ConstructorParameters<typeof McpError>[0];
 
@@ -133,7 +132,7 @@ function anUpstreamFailure(extra: Record<string, unknown> = {}): McpError {
   );
 }
 
-/** `confirmation_token` spelling is pinned (round-trips as the input argument), not proposed. */
+/** `confirmation_token` spelling is pinned; it round-trips as the input argument. */
 function aConfirmationRequired(extra: Record<string, unknown> = {}): McpError {
   return construct(
     {
@@ -145,7 +144,6 @@ function aConfirmationRequired(extra: Record<string, unknown> = {}): McpError {
   );
 }
 
-/** Pending action with unresolved items listed to the model. */
 function aConfirmationRequiredWithUnresolvedItems(extra: Record<string, unknown> = {}): McpError {
   return construct(
     {
@@ -158,7 +156,7 @@ function aConfirmationRequiredWithUnresolvedItems(extra: Record<string, unknown>
   );
 }
 
-/** Empty list must omit the key, same as absent. */
+/** Empty unresolved list must omit the key, same as absent. */
 function aConfirmationRequiredWithEmptyUnresolvedItems(
   extra: Record<string, unknown> = {}
 ): McpError {
@@ -173,8 +171,6 @@ function aConfirmationRequiredWithEmptyUnresolvedItems(
   );
 }
 
-/* End of proposed surface. */
-
 interface ClassUnderTest {
   readonly name: McpErrorClass;
   readonly build: (extra?: Record<string, unknown>) => McpError;
@@ -188,9 +184,7 @@ const CLASSES_UNDER_TEST: readonly ClassUnderTest[] = [
   { name: 'confirmation_required', build: aConfirmationRequired },
 ];
 
-/* Hand-written log-only pin, not derived. Empty rows are the two classes with no log-only fields.
- * `errorCode` is on this list: it sits in the log-column sentence with status class, endpoint
- * class, correlation id and latency. */
+/* Hand-written log-only pin, not derived. Empty rows have no log-only fields. */
 
 type LogOnlyField = readonly [field: string, sentinel: string | number];
 
@@ -224,7 +218,7 @@ function allLogOnlyFields(): readonly LogOnlyField[] {
 
 /* Shape-agnostic walks: a later field rename cannot falsify a value-based case. */
 
-/** Own property names plus reachable primitives. Includes non-enumerable `stack`. */
+/** Own names plus reachable primitives, including non-enumerable `stack`. */
 function deepStrings(value: unknown, seen = new WeakSet<object>()): string[] {
   if (value === null || value === undefined) return [];
   if (typeof value === 'string') return [value];
@@ -249,22 +243,38 @@ function deepStrings(value: unknown, seen = new WeakSet<object>()): string[] {
   return out;
 }
 
+/** Numeric twin of `deepStrings`. Numeric strings excluded. */
+function deepNumbers(value: unknown, seen = new WeakSet<object>()): number[] {
+  if (typeof value === 'number') return [value];
+  if (value === null || typeof value !== 'object') return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const out: number[] = [];
+  const record = value as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(value)) {
+    try {
+      out.push(...deepNumbers(record[key], seen));
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
 /** One string, with a separator no payload can contain, so no match spans two values. */
 function payloadText(payload: unknown): string {
   return deepStrings(payload).join('\u0000');
 }
 
-/**
- * Exact match on a scalar or on a quoted challenge parameter. A value that merely extends the
- * expected one (`…/mcp/nope`) satisfies neither arm.
- */
+/** Exact match on a scalar or quoted challenge parameter. A suffix (`.../mcp/nope`) matches neither. */
 function carriesExactly(payload: unknown, value: string | number): boolean {
   const wanted = String(value);
   const strings = deepStrings(payload);
   return strings.includes(wanted) || strings.some((entry) => entry.includes(`"${wanted}"`));
 }
 
-/** The loose form. Used for absence, where loose is strictly stronger, and for prose. */
+/** Loose match. Used for absence, where loose is stronger, and for prose. */
 function textIncludes(payload: unknown, needle: string | number): boolean {
   return payloadText(payload).includes(String(needle));
 }
@@ -290,12 +300,12 @@ function valuesAtKey(key: string, value: unknown, seen = new WeakSet<object>()):
   return out;
 }
 
-/** Whether an own property with this name exists anywhere in the payload, whatever it holds. */
+/** Whether an own property with this name exists anywhere in the payload. */
 function hasKeyAnywhere(key: string, payload: unknown): boolean {
   return valuesAtKey(key, payload).length > 0;
 }
 
-/** `error` property or rendered `error="…"`. The class discriminant alone is not enough. */
+/** `error` property or rendered `error="..."`. The class discriminant alone is not enough. */
 function carriesChallengeErrorIdentifier(payload: unknown, identifier: string): boolean {
   const underErrorKey = valuesAtKey('error', payload).includes(identifier);
   const inRenderedChallenge = deepStrings(payload).some((entry) =>
@@ -304,7 +314,7 @@ function carriesChallengeErrorIdentifier(payload: unknown, identifier: string): 
   return underErrorKey || inRenderedChallenge;
 }
 
-/** A payload that is `{}` passes every absence assertion. Every leak group calls this. */
+/** `{}` passes every absence assertion. Every leak group calls this. */
 function expectNonEmptyPayload(payload: unknown, label: string): void {
   expect(payload, `${label}: a null payload passes every absence check`).not.toBeNull();
   expect(typeof payload, `${label}: a payload is an object`).toBe('object');
@@ -346,8 +356,6 @@ function nameOf(errorClass: McpErrorClass): string {
     }
   }
 }
-
-/* --- The five classes ------------------------------------------------------------------------ */
 
 describe('the class set', () => {
   it('pins five classes by hand, and the pin itself is not empty', () => {
@@ -485,9 +493,8 @@ describe('the log-only half of the two columns', () => {
   );
 });
 
-/* Instance surface, not accessors. `{ err }` logging already leaked via payload-on-cause.
- * JSON sees enumerable own props; getOwnPropertyNames sees non-enumerable too. `stack`/`message`
- * must stay non-enumerable. Cases also assert expected content so an empty instance cannot pass. */
+/* Instance surface, not accessors. `{ err }` logging leaked via payload-on-cause.
+ * Cases assert content so an empty instance cannot pass. */
 
 const INTRINSIC_ERROR_SLOTS = ['stack', 'message'] as const;
 
@@ -504,7 +511,7 @@ const ALL_FORBIDDEN_VALUES: readonly (string | number)[] = [
   ...STRING_FORBIDDEN_VALUES,
 ];
 
-/** Own properties minus `stack`/`message`, which carry V8 paths that would false-red a numeric sentinel. */
+/** Own properties minus `stack`/`message` (V8 paths would false-red a numeric sentinel). */
 function ownSurfaceWithoutIntrinsics(error: McpError): Record<string, unknown> {
   const surface: Record<string, unknown> = {};
   for (const key of Object.getOwnPropertyNames(error)) {
@@ -560,9 +567,10 @@ describe('the error instance itself', () => {
     );
     expect(
       Object.keys(FORBIDDEN_EXTRAS).length,
-      'control: the forbidden-extras construction supplies something, or half this table is a ' +
-        'duplicate of the other half'
-    ).toBeGreaterThan(0);
+      'keys were deleted from the injection set. The count defends the key surface rather than ' +
+        'the values, since seven of the eight share a value with a sibling, and the key-based ' +
+        'status cases below have nothing left to displace once their key is gone'
+    ).toBe(EXPECTED_FORBIDDEN_EXTRA_COUNT);
   });
 
   it.each(INSTANCE_CASES)(
@@ -571,8 +579,7 @@ describe('the error instance itself', () => {
       const error = build(extra);
       const parsed = JSON.parse(JSON.stringify(error)) as Record<string, unknown>;
 
-      // Exact shape: an extra enumerable field is red immediately. Value-by-value absence stays
-      // so a later legitimate enumerable field does not retire the sentinel checks.
+      // Extra enumerable field is red immediately. Value-by-value absence stays so a later field does not retire sentinels.
       expect(
         parsed,
         'enumerable instance fields beyond class/name reach `{ err }` without calling toLog()'
@@ -705,6 +712,117 @@ describe('the error instance itself', () => {
       }
     }
   );
+});
+
+/* Refusal: construction must throw. Returning never leaks the raw init. */
+
+const UNDECLARED_CLASS = 'sixth';
+
+function constructUndeclared(): McpError {
+  return construct({ class: UNDECLARED_CLASS, ...FORBIDDEN_EXTRAS }, {});
+}
+
+function captureThrow(build: () => McpError): { thrown: unknown; produced: unknown } {
+  const NOTHING = Symbol('nothing was thrown');
+  let thrown: unknown = NOTHING;
+  let produced: unknown = NOTHING;
+  try {
+    produced = build();
+  } catch (error) {
+    thrown = error;
+  }
+  return { thrown: thrown === NOTHING ? undefined : thrown, produced };
+}
+
+describe('an undeclared class', () => {
+  it('is genuinely undeclared, and is handed material worth refusing', () => {
+    expect(
+      (EXPECTED_CLASSES as readonly string[]).includes(UNDECLARED_CLASS),
+      'control: the probe name became a declared class, so these cases now assert that a ' +
+        'legitimate class is refused rather than that an undeclared one is'
+    ).toBe(false);
+    expect(
+      (MCP_ERROR_CLASSES as readonly string[]).includes(UNDECLARED_CLASS),
+      'control: the module declares the probe name, so constructing it is no longer a refusal'
+    ).toBe(false);
+    expect(
+      Object.keys(FORBIDDEN_EXTRAS).length,
+      'control: the refusal is only worth asserting because the init carries material that must ' +
+        'not survive it'
+    ).toBe(EXPECTED_FORBIDDEN_EXTRA_COUNT);
+  });
+
+  it('is refused at construction with a TypeError', () => {
+    expect(
+      () => constructUndeclared(),
+      'the exhaustiveness default has to throw. Returning its `never` binding puts the raw init ' +
+        'into the error, and both payload builders then return it. The two headline guarantees ' +
+        'defeated by one cast'
+    ).toThrow(TypeError);
+  });
+
+  it('produces no McpError at all, rather than a half-built one', () => {
+    const { thrown, produced } = captureThrow(constructUndeclared);
+
+    expect(
+      thrown,
+      'control: construction returned instead of throwing, so there is no refusal to assert about'
+    ).toBeInstanceOf(TypeError);
+    expect(
+      produced,
+      'a refused init must yield no error object. One that exists can be caught, logged and ' +
+        'serialised, and it was never filtered through the declared-field copy'
+    ).not.toBeInstanceOf(McpError);
+    expect(produced, 'a refused init must yield no Error of any kind').not.toBeInstanceOf(Error);
+  });
+
+  it('names the discriminant in the refusal and nothing else it was handed', () => {
+    const { thrown } = captureThrow(constructUndeclared);
+
+    expect(thrown, 'control: nothing was thrown, so there is no message to read').toBeInstanceOf(
+      TypeError
+    );
+    const message = (thrown as Error).message;
+
+    expect(
+      message.length,
+      'control: an empty message passes every absence check below without meaning anything'
+    ).toBeGreaterThan(0);
+    expect(
+      message.includes(UNDECLARED_CLASS),
+      'control: the refusal names the class it refused, so the absence checks below are over a ' +
+        'message that did interpolate something'
+    ).toBe(true);
+
+    // Message only, not the stack: a V8 stack is full of line numbers.
+    for (const value of ALL_FORBIDDEN_VALUES) {
+      expect(
+        message.includes(String(value)),
+        'the refusal interpolates the discriminant alone. A message built from the whole init ' +
+          'carries undeclared material into every log that records a construction failure'
+      ).toBe(false);
+    }
+  });
+
+  it('attaches nothing it was handed to the thrown error, at any depth', () => {
+    const { thrown } = captureThrow(constructUndeclared);
+
+    expect(thrown, 'control: nothing was thrown').toBeInstanceOf(TypeError);
+    expect(
+      deepStrings(thrown).length,
+      'control: the thrown error walked to nothing, so every absence check below holds over an ' +
+        'empty walk rather than over the error'
+    ).toBeGreaterThan(0);
+
+    // String values only: same stack-numbering reason as above.
+    for (const value of STRING_FORBIDDEN_VALUES) {
+      expect(
+        textIncludes(thrown, value),
+        'the refused init reached the thrown error, so a `cause` or a copied property carried ' +
+          'undeclared material past the refusal that was supposed to stop it'
+      ).toBe(false);
+    }
+  });
 });
 
 describe('unauthorized', () => {
@@ -855,6 +973,9 @@ describe('upstream_failure', () => {
   });
 });
 
+/** Hand-written pending-action status literal. */
+const PENDING_ACTION_STATUS = 'confirmation_required';
+
 describe('confirmation_required', () => {
   it('returns a structured pending action to the model', () => {
     const model: unknown = aConfirmationRequired().toModel();
@@ -876,9 +997,11 @@ describe('confirmation_required', () => {
     const model: unknown = aConfirmationRequired().toModel();
 
     expect(
-      textIncludes(model, 'SUMMARY-SENTINEL-8b02'),
-      'the summary shown to the user is generated server-side, so it has to reach the model'
-    ).toBe(true);
+      valuesAtKey('summary', model),
+      'the summary is generated server-side under this field name. A substring check anywhere ' +
+        'in the payload stays green with the text folded into the generic message, where no ' +
+        'client reading summary would ever find it'
+    ).toEqual([SENTINEL.summary]);
   });
 
   it('lists every unresolved item to the model when the write did not fully resolve', () => {
@@ -893,9 +1016,11 @@ describe('confirmation_required', () => {
       ).toBe(true);
     }
     expect(
-      valuesAtKey('unresolved_items', model).length,
-      'the list has to arrive under its own field name, not folded into the prose summary'
-    ).toBeGreaterThan(0);
+      valuesAtKey('unresolved_items', model),
+      'the list has to arrive under its own field name carrying exactly these items. A length ' +
+        'floor passes on an empty array -- valuesAtKey returns the property values, so [] is ' +
+        'one value -- which is the silent partial meal this case exists to catch'
+    ).toEqual([[...SENTINEL.unresolvedItems]]);
   });
 
   it('omits the unresolved-items field entirely when every item resolved', () => {
@@ -927,11 +1052,55 @@ describe('confirmation_required', () => {
 
     expect(carriesExactly(log, SENTINEL.confirmationToken)).toBe(true);
   });
+
+  it('hands the model the pending-action status under its own field name', () => {
+    const model: unknown = aConfirmationRequired().toModel();
+
+    expectNonEmptyPayload(model, 'confirmation_required toModel()');
+    expect(
+      valuesAtKey('status', model),
+      'a pending action reaches the model as a tool result, and its envelope names the state as ' +
+        'status. The class discriminant carries the same string, so it is not that field'
+    ).toContain(PENDING_ACTION_STATUS);
+  });
+
+  it('keeps the pending-action status off the log payload', () => {
+    const log: unknown = aConfirmationRequired().toLog();
+
+    expect(
+      carriesExactly(log, SENTINEL.confirmationToken),
+      'control: the rest of the pending action is still on the log side, so the absence below is ' +
+        'an exclusion rather than an empty payload'
+    ).toBe(true);
+    expect(
+      hasKeyAnywhere('status', log),
+      'status is the model-facing envelope field. The log column already names the state in the ' +
+        'class discriminant, and a second spelling is one more thing to keep in step'
+    ).toBe(false);
+  });
+
+  it('does not let an injected status displace the one the taxonomy states', () => {
+    const error = aConfirmationRequired(FORBIDDEN_EXTRAS);
+    const model: unknown = error.toModel();
+    const log: unknown = error.toLog();
+
+    expectNoForbiddenMaterial(model, 'confirmation_required toModel()');
+    expectNoForbiddenMaterial(log, 'confirmation_required toLog()');
+
+    expect(
+      valuesAtKey('status', model),
+      'the status the model reads is the taxonomy own literal. A caller-supplied one must not ' +
+        'reach that key at all, and a declared field is exactly where a spread init hides'
+    ).toEqual([PENDING_ACTION_STATUS]);
+    expect(
+      hasKeyAnywhere('status', log),
+      'an injected status reached the log payload through a field the taxonomy does declare on ' +
+        'the other side'
+    ).toBe(false);
+  });
 });
 
-/* Protocol codes: JSON-RPC envelope only. `invalid_input` and `confirmation_required` are
- * successful tool results. Pins are hand-written and not derived from each other or from the
- * module. `-32005` is retired. Membership and count, not the live numbers. */
+/* Protocol codes: JSON-RPC envelope only. Pins are hand-written. `-32005` is retired. */
 
 const EXPECTED_PROTOCOL_CODE_CLASSES = [
   'unauthorized',
@@ -941,11 +1110,17 @@ const EXPECTED_PROTOCOL_CODE_CLASSES = [
 
 const EXPECTED_PROTOCOL_CODE_COUNT = 3;
 
-/** Tool-result classes: no envelope code. Separate from the log-only empty list — different contract. */
+/** Tool-result classes: no envelope code. Different contract from the log-only empty list. */
 const CLASSES_WITHOUT_PROTOCOL_CODE = ['invalid_input', 'confirmation_required'] as const;
 
 /** Assigned to `confirmation_required` once; never reassign. */
 const RETIRED_PROTOCOL_CODE = -32005;
+
+const EXPECTED_PROTOCOL_CODES: Readonly<Record<string, number>> = {
+  unauthorized: -32000,
+  insufficient_scope: -32003,
+  upstream_failure: -32004,
+};
 
 function codeEntries(): readonly (readonly [string, number])[] {
   return Object.entries(PROTOCOL_ERROR_CODES).filter(
@@ -978,6 +1153,28 @@ describe('protocol error codes', () => {
       [...EXPECTED_PROTOCOL_CODE_CLASSES, ...CLASSES_WITHOUT_PROTOCOL_CODE].sort(),
       'a class was added or removed without deciding envelope vs tool-result'
     ).toEqual([...EXPECTED_CLASSES].sort());
+  });
+
+  it('assigns each class the exact code it was given, not merely a code in the right range', () => {
+    expect(
+      Object.keys(EXPECTED_PROTOCOL_CODES).length,
+      'entries were deleted from the value pin, and the comparison below would then demand the ' +
+        'module lose them too'
+    ).toBe(EXPECTED_PROTOCOL_CODE_COUNT);
+    expect(
+      Object.keys(EXPECTED_PROTOCOL_CODES).sort(),
+      'the value pin and the membership pin name different classes'
+    ).toEqual([...EXPECTED_PROTOCOL_CODE_CLASSES].sort());
+    expect(
+      new Set(Object.values(EXPECTED_PROTOCOL_CODES)).size,
+      'the value pin gives two classes the same number, so one of them is pinned by the other'
+    ).toBe(EXPECTED_PROTOCOL_CODE_COUNT);
+
+    expect(
+      PROTOCOL_ERROR_CODES,
+      'a code changed. Clients switch on the number, so swapping one is a wire break that ' +
+        'membership, count, range, reserved-band, SDK-avoidance and distinctness all permit'
+    ).toEqual(EXPECTED_PROTOCOL_CODES);
   });
 
   it('declares exactly the three the pin names, and no fourth', () => {
@@ -1095,6 +1292,45 @@ const RELATIVE_IMPORT_FORMS: readonly RegExp[] = [
   // CommonJS interop if the module ever stops being ESM
   /\brequire\s*\(\s*['"`](\.[^'"`]*)['"`]/g,
 ];
+
+/* Band 100..599 over payload numbers. latencyMs 604937 sits outside it, so no exemption list. */
+const HTTP_STATUS_BAND: readonly [number, number] = [100, 599];
+
+describe('HTTP status numbers', () => {
+  it('walks numbers at all, or every band assertion below is vacuous', () => {
+    expect(
+      deepNumbers(anUpstreamFailure().toLog()),
+      'the number walk found nothing in the one payload known to carry a number, so the band ' +
+        'checks below would be passing over nothing'
+    ).toContain(SENTINEL.latencyMs);
+  });
+
+  it.each(CLASSES_UNDER_TEST.map((entry) => [entry.name, entry.build] as const))(
+    '%s puts no HTTP status number in either payload',
+    (name, build) => {
+      const [low, high] = HTTP_STATUS_BAND;
+      const detail =
+        'This module knows nothing about HTTP: the transport frames the status from class, ' +
+        'and which layer owns the number is still an open decision that a payload emitting ' +
+        'one here would settle by accident';
+
+      for (const [shape, error] of [
+        ['clean', build()] as const,
+        ['with forbidden extras', build(FORBIDDEN_EXTRAS)] as const,
+      ]) {
+        for (const [column, payload] of [
+          ['toModel()', error.toModel()] as const,
+          ['toLog()', error.toLog()] as const,
+        ]) {
+          expect(
+            deepNumbers(payload).filter((n) => Number.isInteger(n) && n >= low && n <= high),
+            `${name} ${column} (${shape}) carries an integer in ${String(low)}..${String(high)}. ${detail}`
+          ).toEqual([]);
+        }
+      }
+    }
+  );
+});
 
 describe('the module', () => {
   const source = (): string =>

@@ -9,18 +9,18 @@ logic.
 
 Early. The transport is real and the rest is not yet built.
 
-| Area                                | State                                                                                     |
-| ----------------------------------- | ----------------------------------------------------------------------------------------- |
-| `/mcp` endpoint                     | Reachable. Protocol revision `2026-07-28` selected exclusively.                           |
-| Origin validation                   | Enforced against an explicit allowlist.                                                   |
-| Authentication                      | Enforced against published JWKS. Algorithm, issuer, audience and token type pinned.       |
-| Discovery                           | Protected resource metadata is served, and the `WWW-Authenticate` challenge points at it. |
-| Live grant introspection            | **Not implemented.** Expiry is the only bound on a leaked token today.                    |
-| Tools                               | **None registered.** `tools/list` returns `-32601`.                                       |
-| Lint, format, test, coverage, hooks | Installed. `npm run validate` runs them.                                                  |
+| Area                                | State                                                                                                                                                |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/mcp` endpoint                     | Reachable. Protocol revision `2026-07-28` selected exclusively.                                                                                      |
+| Origin validation                   | Enforced against an explicit allowlist.                                                                                                              |
+| Authentication                      | Token validated offline against published JWKS — algorithm, issuer, audience and token type pinned — then live grant introspection on every request. |
+| Discovery                           | Protected resource metadata is served, and the `WWW-Authenticate` challenge points at it.                                                            |
+| Tools                               | One registered: `nutrition_lookup`.                                                                                                                  |
+| Lint, format, test, coverage, hooks | Installed. `npm run validate` runs them.                                                                                                             |
 
-Because no tool is registered, this service currently exposes no NutriHelp data. Do not deploy it
-publicly in this state.
+Authentication is wired but **not yet operable**: introspection calls an authorization server that
+does not exist yet and fails closed, so every authenticated request is refused until that endpoint
+ships. Do not deploy it publicly in this state.
 
 ## Requirements
 
@@ -46,19 +46,23 @@ disable it.
 Configuration is validated at startup and the process refuses to start on a missing or malformed
 value. Nothing security-relevant defaults.
 
-Eight variables are read today. All eight are required and none of them defaults: a missing one
+Twelve variables are read today. Eleven are required and none of them defaults: a missing one
 stops the process at startup rather than being filled in.
 
-| Variable                  | Description                                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `PORT`                    | The port to listen on. Render injects it.                                                                     |
-| `MCP_ALLOWED_ORIGINS`     | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard.                              |
-| `MCP_JWKS_URL`            | Where verification keys are fetched from. **`https:` only**, with no exemption for loopback.                  |
-| `MCP_EXPECTED_ISSUER`     | The `iss` claim a token must carry. `https:` only. Stored verbatim — it is compared byte for byte.            |
-| `MCP_AUTH_SERVER_URL`     | The authorization server this service names in its public metadata. `https:`, no userinfo, query or fragment. |
-| `MCP_RESOURCE_IDENTIFIER` | This server's canonical identifier, including its path. Also the expected audience. `https:`, normalised.     |
-| `MCP_JWKS_CACHE_TTL_S`    | How long a fetched key set may be reused, in seconds. Between 60 and 86400.                                   |
-| `MCP_REQUEST_DEADLINE_MS` | The end-to-end deadline for one request, in milliseconds. Not a per-call timeout. At most 600000.             |
+| Variable                        | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                          | Yes      | The port to listen on. Render injects it.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `MCP_ALLOWED_ORIGINS`           | Yes      | Comma-separated origin allowlist. An explicit list, not a regex, not a wildcard.                                                                                                                                                                                                                                                                                                                                                                 |
+| `NUTRIHELP_API_BASE_URL`        | Yes      | Base URL of the NutriHelp backend API. **`https:` only** — over cleartext it could be substituted in transit.                                                                                                                                                                                                                                                                                                                                    |
+| `MCP_JWKS_URL`                  | Yes      | Where verification keys are fetched from. **`https:` only**, with no exemption for loopback.                                                                                                                                                                                                                                                                                                                                                     |
+| `MCP_EXPECTED_ISSUER`           | Yes      | The `iss` claim a token must carry. `https:` only. Stored verbatim — it is compared byte for byte.                                                                                                                                                                                                                                                                                                                                               |
+| `MCP_AUTH_SERVER_URL`           | Yes      | The authorization server this service names in its public metadata, and the base of the introspection endpoint. `https:`, no userinfo, query or fragment.                                                                                                                                                                                                                                                                                        |
+| `MCP_RESOURCE_IDENTIFIER`       | Yes      | This server's canonical identifier, including its path. Also the expected audience. `https:`, normalised.                                                                                                                                                                                                                                                                                                                                        |
+| `MCP_JWKS_CACHE_TTL_S`          | Yes      | How long a fetched key set may be reused, in seconds. Between 60 and 86400.                                                                                                                                                                                                                                                                                                                                                                      |
+| `MCP_REQUEST_DEADLINE_MS`       | Yes      | The end-to-end deadline for one request, in milliseconds. Not a per-call timeout. At most 600000.                                                                                                                                                                                                                                                                                                                                                |
+| `MCP_CLIENT_ID`                 | Yes      | This server's own client identifier at the authorization server — `iss` and `sub` of every client assertion. An `https:` URL with a **non-empty path**, and it **must differ from `MCP_RESOURCE_IDENTIFIER`**: resource and client are separate registrations there, and the process refuses to start if the two match. Stored verbatim, never normalised, because the authorization server compares it as a string against what was registered. |
+| `MCP_CLIENT_ASSERTION_KEY`      | Yes      | This server's own private key, PKCS#8 PEM, for `private_key_jwt` at the introspection and exchange endpoints. Parsed at startup, so an unreadable key stops the process instead of surfacing as an outage on the first request. RSA or EC: startup accepts any asymmetric key, but only those two can sign an assertion, so another type fails on the first request instead.                                                                     |
+| `MCP_REVOKED_GRANT_CACHE_TTL_S` | No       | How long an already-inactive grant may be refused from cache, in seconds. Up to 300; **defaults to 0**, meaning ask every time. It never caches an active answer and never permits a call, so it can only ever refuse faster.                                                                                                                                                                                                                    |
 
 `MCP_ALLOWED_ORIGINS` entries are parsed as URLs and reduced to hostnames; the guard is
 port-agnostic. A malformed entry fails startup rather than being skipped.
@@ -67,7 +71,12 @@ port-agnostic. A malformed entry fails startup rather than being skipped.
 and confusing them is a real failure: one is checked against a claim, the other is published to
 anyone who reads the discovery document.
 
-More variables land as each module does; these eight are what the current tree reads. Values come
+`MCP_CLIENT_ID` and `MCP_CLIENT_ASSERTION_KEY` are the pair used for `private_key_jwt` on every
+live introspection (between token validation and scope). The key is this server's own credential,
+never logged. **Both must be registered at the authorization server** before this server can serve
+a request; an unreachable or unrecognised client fails closed rather than serving unchecked.
+
+More variables land as each module does; these twelve are what the current tree reads. Values come
 from the service environment, or from a `.env` file that never overrides one already set. There is no `.env.example`, on purpose — the local values are written out below rather than
 kept in a second file that drifts. `JWT_TOKEN`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` are absent
 by construction and are not to be added.
@@ -78,6 +87,14 @@ Nothing here needs the NutriHelp backend. It does need an authorization server, 
 server will not verify a token without a reachable key set, and that key set must be served over
 `https:` — there is no loopback exemption and there will not be one. So a local run stands up a
 small issuer beside the server.
+
+> **This walkthrough starts the server, and stops short of a tool call.** After a token validates,
+> the server asks the authorization server at `MCP_AUTH_SERVER_URL` whether the grant is still
+> live. The local issuer below serves a key set and nothing else, so that question has no answer
+> and every authenticated request is refused as an upstream failure (`503`) rather than reaching
+> dispatch. Steps 1 to 4 and the unauthenticated checks in step 5 hold; the authenticated check in
+> step 5 and all of step 6 need a running authorization server with introspection enabled and this
+> server's client key registered there.
 
 `npm run token:test` does all of it from **one RS256 key pair**: it generates the pair on first
 run and reuses it afterwards, serves it as a JWKS document over local HTTPS, and prints an access
@@ -106,7 +123,17 @@ MCP_AUTH_SERVER_URL=https://127.0.0.1:8443
 MCP_RESOURCE_IDENTIFIER=https://localhost:3000/mcp
 MCP_JWKS_CACHE_TTL_S=60
 MCP_REQUEST_DEADLINE_MS=10000
+MCP_CLIENT_ID=https://localhost:3000/client
+NUTRIHELP_API_BASE_URL=https://127.0.0.1:9443
 ```
+
+`MCP_CLIENT_ASSERTION_KEY` is required too and is deliberately not in this file. It is a private
+key, so step 2 generates it into `.dev/` and step 4 hands it to the server from there.
+
+Nothing listens on `NUTRIHELP_API_BASE_URL` in this recipe, and nothing needs to: every
+authenticated request is refused at introspection before any backend call would be made.
+`MCP_CLIENT_ID` has a path because the server refuses to start if it equals
+`MCP_RESOURCE_IDENTIFIER` — client and resource are separate registrations.
 
 Two of these look wrong and are not. `MCP_RESOURCE_IDENTIFIER` is `https:` while the dev server
 listens on `http:`, because it is an identifier and an audience rather than an address anything
@@ -151,9 +178,19 @@ openssl req -x509 -newkey rsa:2048 -nodes `
 
 If PowerShell cannot find `openssl`, Git for Windows bundles one at `C:\Program Files\Git\usr\bin`.
 
+Then this server's own client assertion key, the private key it signs `private_key_jwt` with. The
+same line works in both shells:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out .dev/client-assertion-key.pem
+```
+
+`genpkey` writes PKCS#8, the form this variable is documented to take. The server parses the key at
+startup, so an unreadable one stops the process there rather than on the first request.
+
 #### Then protect the directory
 
-`.dev/` holds two secrets, and they are not the same kind of thing:
+`.dev/` holds three secrets, and they are not the same kind of thing:
 
 - **`.dev/tls-key.pem`**, the private key of the certificate above. `CA:TRUE` plus step 4 makes that
   certificate a trust anchor the dev process honours for **every** outbound TLS connection it opens,
@@ -162,12 +199,14 @@ If PowerShell cannot find `openssl`, Git for Windows bundles one at `C:\Program 
   mint a token this server accepts. `openssl` writes the first; the issuer script writes the second,
   which is how a recipe that protected only the `openssl` output left the more directly useful of the
   two readable by every local account.
+- **`.dev/client-assertion-key.pem`**, this server's own client key. Whoever holds it can
+  authenticate to the authorization server as this server.
 
-`.dev/inspector.json` carries a live token minted by the second key, so it is worth the same care.
+`.dev/inspector.json` carries a live token minted by the signing key, so it is worth the same care.
 
-Protect the **directory**, not a list of files. Four files land in `.dev/` between step 2 and step
+Protect the **directory**, not a list of files. Five files land in `.dev/` between step 2 and step
 3, and more will as this server grows; a list of them has to be maintained by hand and is wrong on
-the day a fifth appears, whereas the directory is a boundary that cannot drift.
+the day a sixth appears, whereas the directory is a boundary that cannot drift.
 
 On Linux and macOS one line does it:
 
@@ -260,11 +299,19 @@ key: whoever holds this one can mint a token this server accepts.
 ### 4. Run the server, told to trust that certificate
 
 ```bash
-NODE_EXTRA_CA_CERTS=.dev/tls-cert.pem npm run dev
+MCP_CLIENT_ASSERTION_KEY="$(cat .dev/client-assertion-key.pem)" \
+  NODE_EXTRA_CA_CERTS=.dev/tls-cert.pem npm run dev
 ```
 
-In PowerShell that prefix is not a thing, so set it first:
-`$env:NODE_EXTRA_CA_CERTS = '.dev/tls-cert.pem'; npm run dev`.
+In PowerShell that prefix is not a thing, so set both first:
+
+```powershell
+$env:MCP_CLIENT_ASSERTION_KEY = Get-Content -Raw .dev/client-assertion-key.pem
+$env:NODE_EXTRA_CA_CERTS = '.dev/tls-cert.pem'; npm run dev
+```
+
+The key goes in the environment, not in `.env`, so the private key stays inside the protected
+directory. A value already in the environment wins over `.env`, so the two do not fight.
 
 Without it the key set fetch fails and **every** token is answered `503`, with
 `upstream_failure.key_set_unreachable` in the log — the key set could not be consulted, so nothing
@@ -299,7 +346,7 @@ curl -s -i -X POST http://localhost:3000/mcp \
         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
         "io.modelcontextprotocol/clientCapabilities":{}}}}'
 
-# with the printed token: 404 / -32601, which is PAST authentication
+# with the printed token: 503 today, refused at introspection AFTER the token validated
 curl -s -i -X POST http://localhost:3000/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
@@ -311,9 +358,12 @@ curl -s -i -X POST http://localhost:3000/mcp \
         "io.modelcontextprotocol/clientCapabilities":{}}}}'
 ```
 
-`404` with `-32601` is the correct result today: the token was accepted and dispatch found no
-tool, because none is registered. A `401` there means the token was refused; the server log names
-which check refused it.
+`503` is the correct result in this setup: the token was accepted, and the live grant check that
+follows could not be answered, because the local issuer serves no introspection endpoint. An
+unanswerable check is the retryable class, never an authentication failure, so it is `503` rather
+than `401`. A `401` there means the token itself was refused, or that a real authorization server
+answered that the grant is no longer active. Against a running authorization server with this
+server's client key registered, the same request returns `200` listing `nutrition_lookup`.
 
 **The challenge that comes back with the `401` names a URL you cannot dial in this setup, and that
 is not a fault.** It reads
@@ -361,7 +411,7 @@ try {
   "WWW-Authenticate: $($r.Headers['WWW-Authenticate'])"
 }
 
-# with the printed token: 404 / -32601, which is PAST authentication
+# with the printed token: 503 today, refused at introspection AFTER the token validated
 $authed = $headers.Clone()
 $authed['Authorization'] = "Bearer $TOKEN"
 try {
@@ -395,8 +445,11 @@ has no quoting step to get wrong.
 npm run inspect
 ```
 
-That opens the web UI on `http://localhost:6274` with `.dev/inspector.json` preloaded. Toggle the
-`nutrihelp` server on; it reports **Connected** and `MCP 2026-07-28`.
+That opens the web UI on `http://localhost:6274` with `.dev/inspector.json` preloaded. With only
+the local issuer running, toggling the `nutrihelp` server on **does not connect**: the Inspector's
+first request carries the token, so it meets the same live grant check as step 5 and gets `503`.
+Against a running authorization server with this server's client key registered, it reports
+**Connected** and `MCP 2026-07-28`.
 
 For a headless check, the same config drives the CLI:
 
@@ -404,11 +457,11 @@ For a headless check, the same config drives the CLI:
 npx mcp-inspector --cli --config .dev/inspector.json --server nutrihelp --method initialize
 ```
 
-which answers with this server's own name, version and negotiated protocol revision. Use
-`initialize` rather than `tools/list` for this. The raw endpoint answers `tools/list` with
-`-32601`, as step 5 showed, but the Inspector absorbs that and reports `{"tools": []}` — which is
-also what it reports for a client that never connected at all. An empty list is therefore not
-evidence of anything, and must never be read as a passing check.
+which, once the grant check can be answered, returns this server's own name, version and
+negotiated protocol revision. An empty tool list from the Inspector is not evidence of anything:
+it also reports `{"tools": []}` for a client that never connected at all, so it must never be read
+as a passing check. Evidence that the tool list works is a response the server actually sent,
+naming `nutrition_lookup`.
 
 Two things in `.dev/inspector.json` are load-bearing, and both are why the Inspector is driven
 from a config file rather than from flags:
@@ -498,8 +551,9 @@ curl -s -X POST http://localhost:3000/mcp \
   }'
 ```
 
-Against the current scaffold that returns `-32601 Method not found`, because no tool is
-registered. That is the expected response today, not a misconfiguration.
+Sent as written, with no `Authorization` header, that returns `401` with a Bearer challenge. With a
+valid token it is refused `503` until the authorization server's introspection endpoint exists —
+see § Status. Both are the expected responses today, not misconfigurations.
 
 There is no `initialize` handshake, no session identifier and no sticky routing. Every request
 stands alone.

@@ -38,13 +38,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-/**
- * Zone selectors. None of these files needs to exist, and none of them does today.
- * `src/upstream/client.ts` must stay that way.
- */
+/** Zone selectors. `lintText` uses these paths only to select config overrides; a path may be a
+ * real module or a synthetic representative of a future module in that zone. */
 const ZONE = {
   auth: 'src/auth/tokenValidator.ts',
   tools: 'src/tools/getMealPlan.ts',
+  registry: 'src/tools/registry.ts',
+  audit: 'src/audit/logger.ts',
+  server: 'src/server.ts',
   door: 'src/upstream/client.ts',
   tests: 'test/unit/example.test.ts',
   scripts: 'scripts/makeToken.ts',
@@ -140,8 +141,8 @@ async function expectBlocked({ code, zone, rule }: BlockedRow): Promise<void> {
   expectNoFatal(outcome, zone);
   expect(
     outcome.egress,
-    `This reaches the network from ${zone} and lint let it through. That is a live egress ` +
-      `bypass: close it in eslint.config.js, and do not relax this row.`
+    `A protected egress or import-chain boundary in ${zone} was bypassed. Close the gap in ` +
+      `eslint.config.js, and do not relax this row.`
   ).toContain(rule);
 }
 
@@ -150,8 +151,9 @@ async function expectClean({ code, zone }: CleanRow): Promise<void> {
   expectNoFatal(outcome, zone);
   expect(
     outcome.egress,
-    `An egress rule fired in ${zone}, where this code is permitted. The rule now refuses ` +
-      `legitimate code, which is how a control gets switched off wholesale to unblock someone.`
+    `A protected-boundary rule fired in ${zone}, where this code is permitted. The rule now ` +
+      `refuses legitimate code, which is how a control gets switched off wholesale to unblock ` +
+      `someone.`
   ).toEqual([]);
 }
 
@@ -483,6 +485,145 @@ describe('the tools zone still carries the egress selectors', () => {
   it.each(TOOLS_ZONE)('blocks $name', expectBlocked);
 });
 
+/* --- Import-chain parity -------------------------------------------------------------------
+ * `no-restricted-imports` sees only static imports. Every trust-boundary chain therefore has a
+ * dynamic row using the same target, plus clean rows in every zone that is deliberately allowed.
+ * Removing one generated dynamic counterpart makes its row fail by the named rule id. */
+
+const UPSTREAM_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.server, [
+  {
+    name: "static import of './upstream/client.ts' from the server",
+    code: `import { requestUpstream } from './upstream/client.ts';\nexport const x = requestUpstream;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "dynamic import of './upstream/client.ts' from the server",
+    code: `export const m = await import('./upstream/client.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+const UPSTREAM_CHAIN_PERMITTED: CleanRow[] = [
+  ...clean(ZONE.auth, [
+    {
+      name: 'static upstream import from auth',
+      code: `import { requestUpstream } from '../upstream/client.ts';\nexport const x = requestUpstream;\n`,
+    },
+    {
+      name: 'dynamic upstream import from auth',
+      code: `export const m = await import('../upstream/client.ts');\n`,
+    },
+  ]),
+  ...clean(ZONE.tools, [
+    {
+      name: 'static upstream import from a tool',
+      code: `import { requestUpstream } from '../upstream/client.ts';\nexport const x = requestUpstream;\n`,
+    },
+    {
+      name: 'dynamic upstream import from a tool',
+      code: `export const m = await import('../upstream/client.ts');\n`,
+    },
+  ]),
+  ...clean(ZONE.audit, [
+    {
+      name: 'static upstream import from the audit logger',
+      code: `import { requestUpstream } from '../upstream/client.ts';\nexport const x = requestUpstream;\n`,
+    },
+    {
+      name: 'dynamic upstream import from the audit logger',
+      code: `export const m = await import('../upstream/client.ts');\n`,
+    },
+  ]),
+];
+
+const TOOL_MODULE_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.auth, [
+  {
+    name: "static import of '../tools/getMealPlan.ts' outside the registry",
+    code: `import { tool } from '../tools/getMealPlan.ts';\nexport const x = tool;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "dynamic import of '../tools/getMealPlan.ts' outside the registry",
+    code: `export const m = await import('../tools/getMealPlan.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+const TOOL_SIBLING_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.tools, [
+  {
+    name: "static import of sibling './nutritionLookup.ts' from a tool",
+    code: `import { tool } from './nutritionLookup.ts';\nexport const x = tool;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "dynamic import of sibling './nutritionLookup.ts' from a tool",
+    code: `export const m = await import('./nutritionLookup.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+const TOOL_MODULE_CHAIN_PERMITTED: CleanRow[] = clean(ZONE.registry, [
+  {
+    name: 'static tool-module import from the registry',
+    code: `import { tool } from './getMealPlan.ts';\nexport const x = tool;\n`,
+  },
+  {
+    name: 'dynamic tool-module import from the registry',
+    code: `export const m = await import('./getMealPlan.ts');\n`,
+  },
+]);
+
+const CONFIG_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.auth, [
+  {
+    name: "static import of '../config/index.ts' outside the server",
+    code: `import { config } from '../config/index.ts';\nexport const x = config;\n`,
+    rule: 'no-restricted-imports',
+  },
+  {
+    name: "dynamic import of '../config/index.ts' outside the server",
+    code: `export const m = await import('../config/index.ts');\n`,
+    rule: 'no-restricted-syntax',
+  },
+]);
+
+const CONFIG_CHAIN_PERMITTED: CleanRow[] = clean(ZONE.server, [
+  {
+    name: 'static config import from the server',
+    code: `import { config } from './config/index.ts';\nexport const x = config;\n`,
+  },
+  {
+    name: 'dynamic config import from the server',
+    code: `export const m = await import('./config/index.ts');\n`,
+  },
+]);
+
+const IMPORT_CHAIN_NON_LITERAL: BlockedRow[] = blockedBy(ZONE.door, 'no-restricted-syntax', [
+  {
+    name: 'a non-literal dynamic target from the egress door',
+    code: `const target = '../config/index.ts';\nexport const m = await import(target);\n`,
+  },
+]);
+
+describe('the upstream-client import chain', () => {
+  it.each(UPSTREAM_CHAIN_BLOCKED)('blocks $name', expectBlocked);
+  it.each(UPSTREAM_CHAIN_PERMITTED)('permits $name', expectClean);
+});
+
+describe('the tool-module import chain', () => {
+  it.each(TOOL_MODULE_CHAIN_BLOCKED)('blocks $name', expectBlocked);
+  it.each(TOOL_SIBLING_CHAIN_BLOCKED)('blocks $name', expectBlocked);
+  it.each(TOOL_MODULE_CHAIN_PERMITTED)('permits $name', expectClean);
+});
+
+describe('the config import chain', () => {
+  it.each(CONFIG_CHAIN_BLOCKED)('blocks $name', expectBlocked);
+  it.each(CONFIG_CHAIN_PERMITTED)('permits $name', expectClean);
+});
+
+describe('unanalysable dynamic imports', () => {
+  it.each(IMPORT_CHAIN_NON_LITERAL)('blocks $name', expectBlocked);
+});
+
 /* --- The one egress door --------------------------------------------------------------------
  * These are the rows that stop the suite being satisfied by a rule that refuses everything. */
 
@@ -741,6 +882,14 @@ const ALL_ROWS: readonly (readonly (BlockedRow | CleanRow)[])[] = [
   AXIS_5_RESOLVER,
   AXIS_5_PERMITTED,
   TOOLS_ZONE,
+  UPSTREAM_CHAIN_BLOCKED,
+  UPSTREAM_CHAIN_PERMITTED,
+  TOOL_MODULE_CHAIN_BLOCKED,
+  TOOL_SIBLING_CHAIN_BLOCKED,
+  TOOL_MODULE_CHAIN_PERMITTED,
+  CONFIG_CHAIN_BLOCKED,
+  CONFIG_CHAIN_PERMITTED,
+  IMPORT_CHAIN_NON_LITERAL,
   DOOR_PERMITTED,
   DOOR_STILL_BLOCKED,
   DOOR_STILL_BLOCKED_RESOLVERS,
@@ -755,7 +904,7 @@ const ALL_ROWS: readonly (readonly (BlockedRow | CleanRow)[])[] = [
   ORDINARY,
 ];
 
-const ROW_FLOOR = 100;
+const ROW_FLOOR = 119;
 
 describe('suite completeness', () => {
   it(`carries at least ${String(ROW_FLOOR)} rows`, () => {

@@ -2,7 +2,10 @@ import express, { type Express, type Request, type Response } from 'express';
 import { createMcpHandler, type McpServerFactory } from '@modelcontextprotocol/server';
 import { originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { errors, type JWTPayload } from 'jose';
+import { randomUUID } from 'node:crypto';
 import { KeySetUnavailableError, type TokenValidator } from '../auth/tokenValidator.ts';
+import type { RevocationChecker } from '../auth/revocation.ts';
+import { McpError } from '../errors.ts';
 import {
   insufficientScopeChallenge,
   invalidTokenChallenge,
@@ -35,9 +38,37 @@ export type MissingScopeResolver = (
   claims: JWTPayload
 ) => string | undefined;
 
+/**
+ * Named opt-out for transport-only tests, mirroring `UnauthenticatedTransport`. Live grant
+ * introspection has **no exemption** — not for `tools/list`, not for a public backing endpoint —
+ * so the field below is required and this is the only way to be without one. Omitting a field
+ * would disable the check with nothing to notice it; a literal reads as a decision in the diff.
+ */
+export interface RevocationDisabled {
+  readonly revocationDisabled: 'transport-tests-only';
+}
+
 export interface AuthorizationOptions {
   readonly validator: TokenValidator;
+  /** Required — omit would silently skip live introspection; use `RevocationDisabled` to opt out. */
+  readonly revocation: RevocationChecker | RevocationDisabled;
+  /**
+   * The **one** end-to-end budget for a request, not a per-call timeout. Offline validation
+   * already spends from it — its key-set fetch is an outbound call — so introspection is handed
+   * what **remains**, never a fresh copy. Two stages each taking the full value would let a
+   * request run to twice the configured deadline.
+   */
+  readonly requestDeadlineMs: number;
+  /** Injected so budget exhaustion is testable without waiting. Defaults to the real clock. */
+  readonly now?: () => number;
   readonly missingScopeFor?: MissingScopeResolver;
+}
+
+/** Narrow on the checker, not the sentinel — same reasoning as `authorizes` below. */
+function checksRevocation(
+  revocation: RevocationChecker | RevocationDisabled
+): revocation is RevocationChecker {
+  return 'assertGrantActive' in revocation;
 }
 
 /**
@@ -187,6 +218,14 @@ export function createHttpApp(options: TransportOptions): Express {
   }
 
   async function denyReason(auth: AuthorizationOptions, req: Request): Promise<Denial | undefined> {
+    // One correlation id for every stage of this request.
+    const correlationId = randomUUID();
+
+    // The clock for this request's single budget. Started before the first stage that can spend
+    // from it, so every later stage measures against the same origin.
+    const clock = auth.now ?? Date.now;
+    const startedAt = clock();
+
     // Routing first, unconditional: the next reader of these names (audit, scope) must not
     // inherit an unvalidated value just because no resolver is wired yet.
     const routing: RequestRouting = {
@@ -222,7 +261,32 @@ export function createHttpApp(options: TransportOptions): Express {
       return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
     }
 
-    // Live grant introspection belongs here, between validation and scope. Not built yet.
+    // Between validation and scope; no exemption for tools/list or public backing endpoints.
+    if (checksRevocation(auth.revocation)) {
+      // What is LEFT of the one budget, not a fresh copy of it. Offline validation above has
+      // already spent from it — its key-set fetch goes out through the one door — so handing the
+      // full value here would let a single request run to twice the configured deadline.
+      const remainingMs = auth.requestDeadlineMs - (clock() - startedAt);
+      if (remainingMs <= 0) {
+        // Exhausted before the check could run. Refuse rather than ask with no budget: an
+        // unanswerable introspection is the retryable class, never an authentication failure.
+        report('upstream_failure.deadline_exhausted');
+        return { status: 503 };
+      }
+      try {
+        await auth.revocation.assertGrantActive({
+          token,
+          correlationId,
+          deadlineMs: remainingMs,
+        });
+      } catch (cause: unknown) {
+        // Only authenticated active:false → 401. Unreachable / 5xx / malformed → retryable 503.
+        if (cause instanceof McpError && cause.class === 'unauthorized') {
+          return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
+        }
+        return { status: 503 };
+      }
+    }
 
     const missingScope = auth.missingScopeFor?.(routing, claims);
     if (missingScope !== undefined) {

@@ -7,6 +7,7 @@
  * Env is scrubbed, not overwritten: a shell leftover would make an incomplete recipe pass.
  */
 
+import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,11 +15,31 @@ import { loadConfig } from '../../src/config/index.ts';
 
 const README = readFileSync(fileURLToPath(new URL('../../README.md', import.meta.url)), 'utf8');
 
+/**
+ * The one variable the recipe hands over through the environment rather than `.env`, because its
+ * value is a private key and so cannot be written into a committed document.
+ */
+const HANDED_OFF_KEY = 'MCP_CLIENT_ASSERTION_KEY';
+
+/**
+ * Stands in for the file step 2 generates, which does not exist in a test run. Generated here,
+ * once per file, and never written to disk: key material is not committed and `.dev/` is not read.
+ */
+const IN_TEST_ASSERTION_KEY = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+}).privateKey;
+
 /** Anchored on a variable only the recipe block carries, so the table's rows cannot be mistaken for it. */
 const RECIPE_ANCHOR = 'MCP_RESOURCE_IDENTIFIER=';
 
-/** Everything `loadConfig` can read. `MCP_*` is a prefix sweep; `PORT` is the one that is not. */
+/**
+ * Everything `loadConfig` can read. `MCP_*` is a prefix sweep; these are the ones it misses, and
+ * a shell leftover of either would let a recipe that dropped it pass.
+ */
 const PORT_VAR = 'PORT';
+const UNPREFIXED_VARS: readonly string[] = [PORT_VAR, 'NUTRIHELP_API_BASE_URL'];
 
 /**
  * Loopback names: a fact about the internet, not the README, so this is the one hand-written
@@ -54,7 +75,14 @@ function recipeVariables(): ReadonlyMap<string, string> {
  * would mint a different cert and a TLS error nobody could reproduce.
  */
 function theOneValueOf(pattern: RegExp, what: string): string {
-  const found = [...README.matchAll(pattern)].map((match) => match[1] ?? '');
+  return theOneOf(
+    [...README.matchAll(pattern)].map((match) => match[1] ?? ''),
+    what
+  );
+}
+
+/** The agreement check of `theOneValueOf`, over values some other parser already extracted. */
+function theOneOf(found: readonly string[], what: string): string {
   expect(
     found.length,
     `the README no longer states ${what}, so the case below is asserting over nothing — the recipe was reworded and this parser did not follow it`
@@ -201,36 +229,124 @@ function generatedPaths(): readonly string[] {
 }
 
 /**
- * First-existence step per generated file. Two writers: openssl `-keyout`/`-out` in their step,
- * everything else in the issuer step. Derived so a moved step or renamed file moves with it.
+ * First-existence step per generated file. Two writers: each openssl command's `-keyout`/`-out`
+ * in the step that runs it, everything else in the issuer step. Derived so a moved step or
+ * renamed file moves with it.
  */
 function creationSteps(): ReadonlyMap<string, number> {
   const steps = recipeSteps();
 
   // Fences only: prose mentions writers in steps that do not run them.
-  const stepRunning = (needle: string): number => {
-    const matching = [...steps].filter(([, text]) =>
-      fencesWithin(text).some((block) => block.includes(needle))
-    );
-    expect(
-      matching,
-      `exactly one step must run \`${needle}\`. Zero means the recipe was reworded past this parser and the ordering case is asserting over nothing; more than one means it no longer identifies a single creation point`
-    ).toHaveLength(1);
-    return matching[0]?.[0] ?? 0;
-  };
+  const matching = [...steps].filter(([, text]) =>
+    fencesWithin(text).some((block) => block.includes(ISSUER_COMMAND))
+  );
+  expect(
+    matching,
+    `exactly one step must run \`${ISSUER_COMMAND}\`. Zero means the recipe was reworded past this parser and the ordering case is asserting over nothing; more than one means it no longer identifies a single creation point`
+  ).toHaveLength(1);
+  const issuerStep = matching[0]?.[0] ?? 0;
 
-  const opensslStep = stepRunning('-keyout');
-  const issuerStep = stepRunning(ISSUER_COMMAND);
+  const writers = opensslWriters();
+  expect(
+    writers.size,
+    'no openssl command in any numbered step writes a file, so the ordering case is attributing every file to the issuer — the openssl steps were reworded past this parser'
+  ).toBeGreaterThan(0);
 
   const created = new Map<string, number>();
   for (const path of generatedPaths()) created.set(path, issuerStep);
-  for (const flag of [/-keyout\s+(\S+)/g, /-out\s+(\S+)/g]) {
-    for (const match of README.matchAll(flag)) {
-      created.set(normalisePath(match[1] ?? ''), opensslStep);
-    }
-  }
+  for (const [path, step] of writers) created.set(path, step);
 
   return created;
+}
+
+/** A fence's commands, one per entry, with `\` (bash) and backtick (PowerShell) continuations joined. */
+function commandsIn(block: string): readonly string[] {
+  return block.replace(/[\\`][ \t]*\r?\n/g, ' ').split(/\r?\n/);
+}
+
+/** Every `openssl <subcommand>` a numbered step runs, with that step. */
+function opensslCommands(
+  subcommand: string
+): readonly { readonly command: string; readonly step: number }[] {
+  const invocation = new RegExp(`\\bopenssl\\s+${subcommand}(?:\\s|$)`);
+  const found: { command: string; step: number }[] = [];
+  for (const [step, text] of recipeSteps()) {
+    for (const block of fencesWithin(text)) {
+      for (const command of commandsIn(block)) {
+        if (invocation.test(command)) found.push({ command, step });
+      }
+    }
+  }
+  return found;
+}
+
+/** The value of one flag on each of a set of commands. Space-anchored, so `-out` is not `-keyout`. */
+function flagValues(
+  commands: readonly { readonly command: string }[],
+  flag: string
+): readonly string[] {
+  const pattern = new RegExp(`(?:^|\\s)${flag}\\s+(\\S+)`, 'g');
+  return commands.flatMap(({ command }) =>
+    [...command.matchAll(pattern)].map((match) => match[1] ?? '')
+  );
+}
+
+/** Every file an openssl command writes, keyed to the earliest step that runs one writing it. */
+function opensslWriters(): ReadonlyMap<string, number> {
+  const writers = new Map<string, number>();
+  for (const entry of opensslCommands('\\S+')) {
+    for (const path of flagValues([entry], '-keyout').concat(flagValues([entry], '-out'))) {
+      const at = normalisePath(path);
+      writers.set(at, Math.min(writers.get(at) ?? entry.step, entry.step));
+    }
+  }
+  return writers;
+}
+
+/**
+ * The certificate `openssl req` writes. Scoped to that command: step 2 runs a second openssl
+ * writer, so a document-wide `-out` would be two different files and no longer the certificate.
+ */
+function certificatePath(): string {
+  return theOneOf(flagValues(opensslCommands('req'), '-out'), 'the certificate output path');
+}
+
+/** The client assertion key `openssl genpkey` writes. */
+function assertionKeyWrittenPath(): string {
+  return theOneOf(
+    flagValues(opensslCommands('genpkey'), '-out'),
+    "the client assertion key's output path"
+  );
+}
+
+/** Exactly one occurrence, not merely agreeing ones: each shell has one hand-off line. */
+function theOnlyValueOf(pattern: RegExp, what: string): string {
+  const found = [...README.matchAll(pattern)].map((match) => match[1] ?? '');
+  expect(
+    found,
+    `the README must state ${what} exactly once. Zero means it was reworded past this parser and the case is asserting over nothing; more than one means a reader cannot tell which line is the recipe`
+  ).toHaveLength(1);
+  return found[0] ?? '';
+}
+
+/**
+ * Where step 4 reads the key from, in both shells. Two-shell agreement as for the generated
+ * directory: a diverged pair reads a file one shell's reader never generated.
+ */
+function assertionKeyHandOffPath(): string {
+  const bash = theOnlyValueOf(
+    new RegExp(`\\b${HANDED_OFF_KEY}="\\$\\(cat\\s+([^)\\s]+)\\)"`, 'g'),
+    'the bash hand-off of the client assertion key'
+  );
+  const powershell = theOnlyValueOf(
+    new RegExp(`\\$env:${HANDED_OFF_KEY}\\s*=\\s*Get-Content\\s+-Raw\\s+(\\S+)`, 'g'),
+    'the PowerShell hand-off of the client assertion key'
+  );
+  expect(
+    normalisePath(powershell),
+    `the bash and PowerShell forms of step 4 read the client assertion key from different files (${bash} vs ${powershell}), so one shell starts the server with a key nothing generated`
+  ).toBe(normalisePath(bash));
+  return normalisePath(bash);
 }
 
 /** The fenced bodies inside one step, which is where its commands are and its prose is not. */
@@ -278,8 +394,9 @@ beforeEach(() => {
   for (const name of Object.keys(process.env)) {
     if (name.startsWith('MCP_')) unset(name);
   }
-  unset(PORT_VAR);
+  for (const name of UNPREFIXED_VARS) unset(name);
   for (const [name, value] of recipeVariables()) set(name, value);
+  set(HANDED_OFF_KEY, IN_TEST_ASSERTION_KEY);
 });
 
 afterEach(() => {
@@ -318,6 +435,54 @@ describe("the README's local development recipe", () => {
         `${name} is in the README recipe but removing it does not stop startup, so the recipe is teaching a reader to set a variable nothing reads`
       ).toThrow();
       set(name, recipeVariables().get(name) ?? '');
+    }
+
+    // The recipe's set is the `.env` block plus the step-4 hand-off; the hand-off must be load-bearing too.
+    Reflect.deleteProperty(process.env, HANDED_OFF_KEY);
+    expect(
+      () => loadConfig(),
+      `${HANDED_OFF_KEY} is handed to the server in step 4 but removing it does not stop startup, so the recipe is teaching a reader to generate and pass a key nothing reads`
+    ).toThrow(HANDED_OFF_KEY);
+  });
+
+  it('keeps the client assertion key out of the .env block and hands over the key step 2 generates', () => {
+    // A private key cannot sit in a committed document, so the README routes it through a file.
+    expect(
+      [...recipeVariables().keys()],
+      `${HANDED_OFF_KEY} is in the README's .env block, which puts a private key in a committed document`
+    ).not.toContain(HANDED_OFF_KEY);
+
+    const read = assertionKeyHandOffPath();
+    const written = assertionKeyWrittenPath();
+    expect(
+      read,
+      `step 4 hands the server ${read} but openssl genpkey writes the key to ${written}, so the server starts with a key nothing generated`
+    ).toBe(normalisePath(written));
+
+    expect(
+      parentOf(read),
+      `the client assertion key lives at ${read}, outside ${generatedDirectory()} — the permissions step covers that directory and nothing else, so the key is left unprotected`
+    ).toBe(generatedDirectory());
+
+    // Its writer must be the openssl command, not the issuer fallback in `creationSteps`.
+    const writtenAt = opensslWriters().get(read);
+    expect(
+      writtenAt,
+      `no openssl command in a numbered step writes ${read}, so nothing in the recipe generates the key step 4 reads`
+    ).toBeDefined();
+
+    const readAt = pathUsagesByStep()
+      .filter(({ path }) => path === read)
+      .map(({ step }) => step);
+    expect(
+      readAt.length,
+      `no numbered step's commands name ${read}, so the hand-off is not inside the recipe this case orders`
+    ).toBeGreaterThan(0);
+    for (const step of readAt) {
+      expect(
+        writtenAt ?? Number.MAX_SAFE_INTEGER,
+        `step ${String(step)} reads ${read}, which openssl does not write until step ${String(writtenAt)}`
+      ).toBeLessThanOrEqual(step);
     }
   });
 
@@ -412,7 +577,7 @@ describe("the README's local development recipe", () => {
 
   it('trusts the certificate file the openssl step actually writes', () => {
     // Step 2 write path vs step 4 trust path; rename one and TLS fails as "untrusted", not missing.
-    const written = theOneValueOf(/-out\s+(\S+)/g, 'the certificate output path');
+    const written = certificatePath();
     const trusted = theOneValueOf(
       /NODE_EXTRA_CA_CERTS\s*=\s*'?([^\s'`;]+)/g,
       'the trusted CA path'
@@ -451,7 +616,9 @@ describe("the README's local development recipe", () => {
     const directory = generatedDirectory();
     const generated = [
       theOneValueOf(/-keyout\s+(\S+)/g, "the TLS key's path"),
-      theOneValueOf(/-out\s+(\S+)/g, 'the certificate output path'),
+      certificatePath(),
+      assertionKeyWrittenPath(),
+      assertionKeyHandOffPath(),
       theOneValueOf(/NODE_EXTRA_CA_CERTS\s*=\s*'?([^\s'`;]+)/g, 'the trusted CA path'),
       theOneValueOf(/require\('([^']+)'\)/g, 'the Inspector config the token comes back out of'),
       theOneValueOf(/--config\s+(\S+)/g, 'the Inspector config the CLI is pointed at'),
