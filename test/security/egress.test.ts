@@ -46,6 +46,7 @@ const ZONE = {
   registry: 'src/tools/registry.ts',
   audit: 'src/audit/logger.ts',
   server: 'src/server.ts',
+  consent: 'src/consent/confirmation.ts',
   door: 'src/upstream/client.ts',
   tests: 'test/unit/example.test.ts',
   scripts: 'scripts/makeToken.ts',
@@ -490,15 +491,15 @@ describe('the tools zone still carries the egress selectors', () => {
  * dynamic row using the same target, plus clean rows in every zone that is deliberately allowed.
  * Removing one generated dynamic counterpart makes its row fail by the named rule id. */
 
-const UPSTREAM_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.server, [
+const UPSTREAM_CHAIN_BLOCKED: BlockedRow[] = blocked(ZONE.consent, [
   {
-    name: "static import of './upstream/client.ts' from the server",
-    code: `import { requestUpstream } from './upstream/client.ts';\nexport const x = requestUpstream;\n`,
+    name: "static import of '../upstream/client.ts' from the confirmation store",
+    code: `import { connectKeyValue } from '../upstream/client.ts';\nexport const x = connectKeyValue;\n`,
     rule: 'no-restricted-imports',
   },
   {
-    name: "dynamic import of './upstream/client.ts' from the server",
-    code: `export const m = await import('./upstream/client.ts');\n`,
+    name: "dynamic import of '../upstream/client.ts' from the confirmation store",
+    code: `export const m = await import('../upstream/client.ts');\n`,
     rule: 'no-restricted-syntax',
   },
 ]);
@@ -532,6 +533,18 @@ const UPSTREAM_CHAIN_PERMITTED: CleanRow[] = [
     {
       name: 'dynamic upstream import from the audit logger',
       code: `export const m = await import('../upstream/client.ts');\n`,
+    },
+  ]),
+  // The composition root opens the Key Value connection and injects a port downward. Without
+  // these rows the widening that allows it is indistinguishable from the chain breaking.
+  ...clean(ZONE.server, [
+    {
+      name: 'static upstream import from the composition root',
+      code: `import { connectKeyValue } from './upstream/client.ts';\nexport const x = connectKeyValue;\n`,
+    },
+    {
+      name: 'dynamic upstream import from the composition root',
+      code: `export const m = await import('./upstream/client.ts');\n`,
     },
   ]),
 ];
@@ -904,7 +917,7 @@ const ALL_ROWS: readonly (readonly (BlockedRow | CleanRow)[])[] = [
   ORDINARY,
 ];
 
-const ROW_FLOOR = 119;
+const ROW_FLOOR = 121;
 
 describe('suite completeness', () => {
   it(`carries at least ${String(ROW_FLOOR)} rows`, () => {
