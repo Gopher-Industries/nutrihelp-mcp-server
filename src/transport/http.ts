@@ -1,10 +1,15 @@
 import express, { type Express, type Request, type Response } from 'express';
-import { createMcpHandler, type McpServerFactory } from '@modelcontextprotocol/server';
+import {
+  createMcpHandler,
+  type McpServerFactory,
+  type AuthInfo,
+} from '@modelcontextprotocol/server';
 import { originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { errors, type JWTPayload } from 'jose';
 import { randomUUID } from 'node:crypto';
 import { KeySetUnavailableError, type TokenValidator } from '../auth/tokenValidator.ts';
-import type { RevocationChecker } from '../auth/revocation.ts';
+import type { ActiveGrant, RevocationChecker } from '../auth/revocation.ts';
+import { createWriteAuthInfo } from '../auth/writeContext.ts';
 import { McpError } from '../errors.ts';
 import {
   insufficientScopeChallenge,
@@ -35,7 +40,8 @@ export interface RequestRouting {
  */
 export type MissingScopeResolver = (
   routing: RequestRouting,
-  claims: JWTPayload
+  claims: JWTPayload,
+  liveGrant?: ActiveGrant
 ) => string | undefined;
 
 /**
@@ -218,6 +224,8 @@ export function createHttpApp(options: TransportOptions): Express {
   }
 
   async function denyReason(auth: AuthorizationOptions, req: Request): Promise<Denial | undefined> {
+    const authenticatedRequest = req as Request & { auth?: AuthInfo };
+    delete authenticatedRequest.auth;
     // One correlation id for every stage of this request.
     const correlationId = randomUUID();
 
@@ -261,6 +269,7 @@ export function createHttpApp(options: TransportOptions): Express {
       return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
     }
 
+    let liveGrant: ActiveGrant | undefined;
     // Between validation and scope; no exemption for tools/list or public backing endpoints.
     if (checksRevocation(auth.revocation)) {
       // What is LEFT of the one budget, not a fresh copy of it. Offline validation above has
@@ -274,7 +283,7 @@ export function createHttpApp(options: TransportOptions): Express {
         return { status: 503 };
       }
       try {
-        await auth.revocation.assertGrantActive({
+        liveGrant = await auth.revocation.assertGrantActive({
           token,
           correlationId,
           deadlineMs: remainingMs,
@@ -288,7 +297,7 @@ export function createHttpApp(options: TransportOptions): Express {
       }
     }
 
-    const missingScope = auth.missingScopeFor?.(routing, claims);
+    const missingScope = auth.missingScopeFor?.(routing, claims, liveGrant);
     if (missingScope !== undefined) {
       report(`insufficient_scope.${safeInOneLine(missingScope)}`);
       return {
@@ -297,6 +306,16 @@ export function createHttpApp(options: TransportOptions): Express {
       };
     }
 
+    if (liveGrant !== undefined) {
+      const verified = createWriteAuthInfo(claims, liveGrant, {
+        token,
+        correlationId,
+        deadlineAt: startedAt + auth.requestDeadlineMs,
+        now: clock,
+        resourceMetadataUrl,
+      });
+      if (verified !== undefined) authenticatedRequest.auth = verified;
+    }
     return undefined;
   }
 

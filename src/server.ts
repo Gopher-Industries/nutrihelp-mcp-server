@@ -8,6 +8,7 @@ import { protectedResourceMetadata } from './auth/metadata.ts';
 import { protectedResourceMetadataUrl } from './auth/challenge.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createRevocationChecker } from './auth/revocation.ts';
+import { missingRecordMealScope } from './auth/writeContext.ts';
 import { createHttpApp } from './transport/http.ts';
 import { registerTools } from './tools/registry.ts';
 
@@ -52,6 +53,9 @@ const app = createHttpApp({
       version: '1.0.0',
     });
 
+    // Ticket 49 is registered for verified write-scoped requests. Its fourth argument must
+    // supply shared confirmations, durable audit and credential exchange before it can run.
+    // Those deployment adapters are not in this branch; missing services fail closed.
     registerTools(server, ctx, config);
 
     return server;
@@ -65,6 +69,7 @@ const app = createHttpApp({
     validator: tokenValidator,
     revocation: revocationChecker,
     requestDeadlineMs: config.requestDeadlineMs,
+    missingScopeFor: missingRecordMealScope,
   },
   onError: (error: Error) => {
     // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.

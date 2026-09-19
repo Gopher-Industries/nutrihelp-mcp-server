@@ -1,0 +1,33 @@
+name: Confirmation store
+on:
+  pull_request:
+  push:
+    branches: [main, feature/ticket-48-confirmation-store]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  redis-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MCP_CONFIRMATION_TEST_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run validate
+      - name: Real Redis state transitions and independent mutation checks
+        run: npm run test:integration

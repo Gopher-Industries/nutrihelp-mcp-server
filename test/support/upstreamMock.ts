@@ -54,6 +54,7 @@ export interface RouteSpec {
    * beyond the slice itself. Same mechanism the `jwks` outcome already uses.
    */
   readonly delayMs?: number;
+  readonly responseHeaders?: Record<string, string>;
 }
 
 /**
@@ -174,7 +175,9 @@ export function installUpstreamMock(
     const scope = agent
       .get(spec.origin ?? NUTRIHELP_API_ORIGIN)
       .intercept({ path: spec.path, method: spec.method ?? 'GET' })
-      .reply(spec.status, spec.body, { headers: { 'content-type': 'application/json' } });
+      .reply(spec.status, spec.body, {
+        headers: { 'content-type': 'application/json', ...spec.responseHeaders },
+      });
     if (spec.delayMs !== undefined) scope.delay(spec.delayMs);
     if (spec.once !== true) scope.persist();
   }

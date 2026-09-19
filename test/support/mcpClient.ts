@@ -7,7 +7,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { Agent, request } from 'undici';
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type McpRequestContext } from '@modelcontextprotocol/server';
 import {
   CLIENT_CAPABILITIES_META_KEY,
   CLIENT_INFO_META_KEY,
@@ -81,6 +81,7 @@ export interface TestServer {
 export type RevocationFixture = RevocationChecker | RevocationDisabled | 'live';
 
 export interface TestServerOptions {
+  readonly configureServer?: (server: McpServer, context: McpRequestContext) => void;
   /** Only way to reach the 403 branch until a tool-to-scope map exists. */
   readonly missingScopeFor?: MissingScopeResolver;
   /** Fires once a request reaches the MCP handler — otherwise dispatch is invisible with no tools registered. */
@@ -185,15 +186,16 @@ export async function startTestServer(
   optionsOrConfigure: TestServerOptions | ((server: McpServer) => void) = {}
 ): Promise<TestServer> {
   const options = typeof optionsOrConfigure === 'function' ? {} : optionsOrConfigure;
-  const configureServer = typeof optionsOrConfigure === 'function' ? optionsOrConfigure : undefined;
+  const configureServer =
+    typeof optionsOrConfigure === 'function' ? optionsOrConfigure : options.configureServer;
   const errors: Error[] = [];
   const introspections: IntrospectionRequest[] = [];
   const revocationEvents: (OperationalEvent | SecurityEvent)[] = [];
   const app = createHttpApp({
-    factory: () => {
+    factory: (context) => {
       options.onDispatch?.();
       const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
-      configureServer?.(server);
+      configureServer?.(server, context);
       return server;
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],

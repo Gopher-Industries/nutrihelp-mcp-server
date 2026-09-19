@@ -1,14 +1,93 @@
-/** The single point through which every outbound call to the NutriHelp backend passes.
+/** The single egress module for NutriHelp HTTP and Render Key Value connections.
  * Supports unauthenticated GET and declared query assembly with identity filtering.
- * Credential attachment and retry with backoff/jitter remain future work.
+ * Confirmed meal writes accept only a backend credential supplied by the exchange adapter.
+ * An uncertain write is retried through the confirmation store, never automatically here.
  * Do not improvise outbound policy in a caller.
  */
 
-/**
- * Conventional name until the backend contract pins it. If the caller passes `undefined`, a
- * fresh id is minted — that one does not join the inbound request.
- */
+import { createClient } from '@redis/client';
+import { mealInputSchema, type MealSnapshot } from '../mealLog/schema.ts';
+
+/** Inbound correlation id, or a freshly minted id when none was supplied. */
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
+
+export interface KeyValueConnection {
+  readonly eval: (
+    script: string,
+    keys: string[],
+    args: string[],
+    timeoutMs: number
+  ) => Promise<unknown>;
+  readonly close: () => void;
+}
+
+/** The Redis socket stays in the same egress module as HTTP. No offline command queue. */
+export async function connectKeyValue(url: string, timeoutMs: number): Promise<KeyValueConnection> {
+  assertUsableDeadline(timeoutMs);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.search || parsed.hash) {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  let client: ReturnType<typeof createClient>;
+  try {
+    client = createClient({
+      url,
+      disableOfflineQueue: true,
+      socket: {
+        connectTimeout: timeoutMs,
+        // Eight retries, capped exponential delay plus jitter; failed commands are never queued.
+        reconnectStrategy: (retries) =>
+          retries >= 8
+            ? false
+            : Math.min(100 * 2 ** retries, 2_000) + Math.floor(Math.random() * 100),
+      },
+    });
+  } catch {
+    throw new TypeError('Invalid Key Value configuration');
+  }
+  // Required EventEmitter listener. Command/connect rejections report only a generic failure.
+  client.on('error', () => {
+    // Individual operations reject. Logging this event would expose the Redis URL or command.
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      client.connect(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('Key Value connection timed out'));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch {
+    if (client.isOpen) client.destroy();
+    throw new Error('Key Value connection unavailable');
+  } finally {
+    clearTimeout(timer);
+  }
+  return {
+    async eval(script, keys, args, commandTimeoutMs) {
+      assertUsableDeadline(commandTimeoutMs);
+      try {
+        if (!client.isReady) throw new Error('Key Value connection unavailable');
+        return await client.withCommandOptions({ timeout: commandTimeoutMs }).eval(script, {
+          keys,
+          arguments: args,
+        });
+      } catch {
+        throw new Error('Key Value command unavailable');
+      }
+    },
+    close() {
+      if (client.isOpen) client.destroy();
+    },
+  };
+}
 
 /** Allowlist: a deny-list of credential names is never complete. */
 const FORWARDABLE_REQUEST_HEADERS = new Set([
@@ -284,4 +363,70 @@ export async function fetchUpstream(request: UpstreamRequest): Promise<Response>
     correlationId: request.correlationId,
     redirect: 'error',
   });
+}
+/** A single confirmed snapshot. The path and headers are never selected by tool input. */
+export interface MealLogWriteRequest {
+  readonly baseUrl: string;
+  readonly meal: MealSnapshot;
+  /** Exchanged backend credential from the trusted auth adapter, not an MCP access token. */
+  readonly credential: string;
+  readonly idempotencyKeyHash: string;
+  readonly correlationId: string;
+  readonly deadlineMs: number;
+}
+
+async function boundedMealResponse(response: Response): Promise<Response> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new TypeError('Meal response is empty');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const bytes: unknown = next.value;
+      if (!(bytes instanceof Uint8Array)) throw new TypeError('Invalid meal response chunk');
+      size += bytes.byteLength;
+      if (size > 32 * 1024) throw new TypeError('Meal response exceeds its limit');
+      chunks.push(bytes);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return new Response(Buffer.concat(chunks), {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+
+export async function postMealLog(request: MealLogWriteRequest): Promise<Response> {
+  const base = new URL(request.baseUrl);
+  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) {
+    throw new TypeError('Meal log writes require the configured HTTPS backend');
+  }
+  if (
+    !/^[0-9a-f]{64}$/.test(request.idempotencyKeyHash) ||
+    !/^[A-Za-z0-9\-._~+/]+=*$/.test(request.credential)
+  ) {
+    throw new TypeError('A backend credential and confirmation digest are required');
+  }
+  if (!Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= 0) {
+    throw new TypeError('A positive remaining deadline is required');
+  }
+  const meal = mealInputSchema.parse(request.meal);
+  const response = await fetch(new URL('/api/meallog/me', base), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      authorization: `Bearer ${request.credential}`,
+      'Idempotency-Key': request.idempotencyKeyHash,
+      [CORRELATION_ID_HEADER]: request.correlationId,
+    },
+    body: JSON.stringify(meal),
+    redirect: 'error',
+    signal: AbortSignal.timeout(request.deadlineMs),
+  });
+  // No transparent retries: only the confirmation store may reclaim an uncertain attempt.
+  return boundedMealResponse(response);
 }

@@ -2,11 +2,14 @@
  * The single dispatch path for every tool. server.ts registers tools by calling
  * registerTools — it never imports a tool module directly.
  *
- * Minimal scaffolding (ticket 25) — registers nutrition_lookup. Auth-gated tools land here once they exist, gated on ctx.authInfo.
+ * Public nutrition lookup and the verified, scoped record_meal descriptor.
  */
 import type { McpServer, McpRequestContext } from '@modelcontextprotocol/server';
 // 1. Import the plain descriptor package directly from the tool file
 import { descriptor as nutritionLookup } from './nutritionLookup.ts';
+import { descriptor as recordMeal } from './recordMeal.ts';
+import { MEAL_LOG_WRITE_SCOPE, writeContextFor } from '../auth/writeContext.ts';
+import type { RecordMealServices } from '../mealLog/runtime.ts';
 
 export interface RegistryConfig {
   readonly nutrihelpApiBaseUrl: string;
@@ -16,7 +19,8 @@ export interface RegistryConfig {
 export function registerTools(
   server: McpServer,
   ctx: McpRequestContext,
-  config: RegistryConfig
+  config: RegistryConfig,
+  recordMealServices?: RecordMealServices
 ): void {
   // 2. Build a declarative list of standard, unauthenticated tools
   const publicTools = [
@@ -35,9 +39,18 @@ export function registerTools(
     );
   }
 
-  // 4. Auth-gated tools land here declaratively once they exist, e.g.:
-  // if (ctx.authInfo) {
-  //   const privateTools = [ ... ];
-  //   // loop and register private tools
-  // }
+  const writeContext = writeContextFor(ctx.authInfo);
+  if (
+    writeContext?.tokenScopes.includes(MEAL_LOG_WRITE_SCOPE) &&
+    writeContext.liveScopes.includes(MEAL_LOG_WRITE_SCOPE)
+  ) {
+    server.registerTool(
+      recordMeal.name,
+      {
+        ...recordMeal.contract,
+        inputSchema: recordMeal.inputSchema,
+      },
+      recordMeal.handler(config, writeContext, recordMealServices)
+    );
+  }
 }
