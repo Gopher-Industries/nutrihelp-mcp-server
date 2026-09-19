@@ -287,6 +287,42 @@ describe('axis 1: module specifier', () => {
   it.each(AXIS_1_DYNAMIC)('blocks $name', expectBlocked);
 });
 
+describe('Redis uses the existing egress door', () => {
+  for (const specifier of [
+    'redis',
+    'redis/dist/index.js',
+    '@redis/client',
+    '@redis/client/dist/index.js',
+  ]) {
+    it(`blocks static and dynamic ${specifier} imports outside the door`, async () => {
+      await expectBlocked({
+        name: specifier,
+        zone: ZONE.auth,
+        rule: 'no-restricted-imports',
+        code: `import { createClient } from '${specifier}'; export const x = createClient;`,
+      });
+      await expectBlocked({
+        name: specifier,
+        zone: ZONE.auth,
+        rule: 'no-restricted-syntax',
+        code: `export const x = await import('${specifier}');`,
+      });
+    });
+    it(`permits ${specifier} in the egress door`, async () => {
+      await expectClean({
+        name: specifier,
+        zone: ZONE.door,
+        code: `import { createClient } from '${specifier}'; export const x = createClient;`,
+      });
+      await expectClean({
+        name: specifier,
+        zone: ZONE.door,
+        code: `export const x = await import('${specifier}');`,
+      });
+    });
+  }
+});
+
 /* --- Axis 2: reference form -----------------------------------------------------------------
  * `no-restricted-globals` sees only a bare identifier. Everything below reaches the same
  * function through a receiver, and each form needs its own selector. */
