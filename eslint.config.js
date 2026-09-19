@@ -198,7 +198,8 @@ const EGRESS_SYNTAX = [
 
 const CHAIN_UPSTREAM = {
   group: ['**/upstream/client', '**/upstream/client.ts', '**/upstream/client.js'],
-  message: 'Only src/auth/*, src/tools/* and src/audit/logger.ts may import the upstream client.',
+  message:
+    'Only src/auth/*, src/tools/*, src/audit/logger.ts and src/server.ts may import the upstream client.',
 };
 
 const CHAIN_TOOL_MODULES = {
@@ -411,8 +412,11 @@ export default tseslint.config(
   {
     files: ['src/server.ts'],
     rules: {
-      'no-restricted-imports': restrictedImports({ config: true }),
-      'no-restricted-syntax': restrictedSyntax({ config: true }),
+      // The composition root may import the egress door: it opens the Key Value connection
+      // and injects an { eval } port into src/consent/confirmation.ts, which therefore stays
+      // off this chain and holds no connection of its own.
+      'no-restricted-imports': restrictedImports({ config: true, upstreamClient: true }),
+      'no-restricted-syntax': restrictedSyntax({ config: true, upstreamClient: true }),
     },
   },
 
