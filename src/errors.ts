@@ -77,6 +77,8 @@ export interface UpstreamFailureInit {
 }
 
 export interface ConfirmationRequiredInit {
+  /** Stable anomaly code for operators only; never a token, identity or argument. */
+  readonly detailCode?: string;
   readonly class: 'confirmation_required';
   /** Server-side wording of the resolved arguments. */
   readonly summary: string;
@@ -162,6 +164,7 @@ export type McpErrorLogPayload =
       readonly class: 'confirmation_required';
       readonly summary: string;
       readonly confirmation_token: string;
+      readonly detailCode?: string;
     };
 
 /**
@@ -240,6 +243,7 @@ function declaredFieldsOnly(init: McpErrorInit): McpErrorInit {
         summary: init.summary,
         confirmation_token: init.confirmation_token,
         ...renderUnresolvedItems(init.unresolved_items),
+        ...(init.detailCode === undefined ? {} : { detailCode: init.detailCode }),
       };
     default:
       return refuseUndeclaredClass(init);
@@ -344,6 +348,7 @@ export class McpError extends Error {
           class: 'confirmation_required',
           summary: init.summary,
           confirmation_token: init.confirmation_token,
+          ...(init.detailCode === undefined ? {} : { detailCode: init.detailCode }),
         };
       default:
         return refuseUndeclaredClass(init);
@@ -362,5 +367,40 @@ export class RetryableUpstreamError extends McpError {
       latencyMs: 0,
     });
     this.name = 'RetryableUpstreamError';
+  }
+}
+
+/** Confirmation failures participate in the existing five-class taxonomy. */
+export type ConfirmationFailureCode =
+  | 'invalid_confirmation'
+  | 'confirmation_mismatch'
+  | 'confirmation_store_unavailable'
+  | 'confirmation_attempt_lost'
+  | 'confirmation_write_failed'
+  | 'confirmation_result_invalid';
+
+export class ConfirmationError extends McpError {
+  readonly code: ConfirmationFailureCode;
+
+  constructor(code: ConfirmationFailureCode) {
+    super(
+      code === 'invalid_confirmation' || code === 'confirmation_mismatch'
+        ? {
+            class: 'confirmation_required',
+            summary: 'This confirmation is invalid or expired. Request a new preview.',
+            confirmation_token: '',
+            detailCode: code,
+          }
+        : {
+            class: 'upstream_failure',
+            statusClass: 'unavailable',
+            errorCode: code,
+            endpointClass: 'confirmation_store',
+            correlationId: 'unavailable',
+            latencyMs: 0,
+          }
+    );
+    this.name = 'ConfirmationError';
+    this.code = code;
   }
 }

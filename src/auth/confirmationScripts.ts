@@ -24,13 +24,13 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {'invalid'} end
 local record = cjson.decode(raw)
 if record.binding_hash ~= ARGV[1] or record.arguments_hash ~= ARGV[2] then
-  return {'invalid'}
+  return {'mismatch'}
 end
 if record.state == 'done' then return {'done', record.result} end
-if record.expires_at <= now then return {'invalid'} end
 if record.state == 'in_progress' and record.lease_until > now then
   return {'in_progress', tostring(record.lease_until - now)}
 end
+if record.expires_at <= now then return {'invalid'} end
 if record.state ~= 'pending' and record.state ~= 'in_progress' then return {'invalid'} end
 record.state = 'in_progress'
 record.owner = ARGV[3]

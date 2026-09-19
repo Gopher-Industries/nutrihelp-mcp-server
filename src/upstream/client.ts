@@ -36,7 +36,14 @@ export async function connectKeyValue(url: string, timeoutMs: number): Promise<K
     client = createClient({
       url,
       disableOfflineQueue: true,
-      socket: { connectTimeout: timeoutMs, reconnectStrategy: false },
+      socket: {
+        connectTimeout: timeoutMs,
+        // Eight retries, capped exponential delay plus jitter; failed commands are never queued.
+        reconnectStrategy: (retries) =>
+          retries >= 8
+            ? false
+            : Math.min(100 * 2 ** retries, 2_000) + Math.floor(Math.random() * 100),
+      },
     });
   } catch {
     throw new TypeError('Invalid Key Value configuration');
@@ -65,6 +72,7 @@ export async function connectKeyValue(url: string, timeoutMs: number): Promise<K
     async eval(script, keys, args, commandTimeoutMs) {
       assertUsableDeadline(commandTimeoutMs);
       try {
+        if (!client.isReady) throw new Error('Key Value connection unavailable');
         return await client.withCommandOptions({ timeout: commandTimeoutMs }).eval(script, {
           keys,
           arguments: args,
