@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { McpError, ConfirmationError } from '../errors.ts';
+export { ConfirmationError } from '../errors.ts';
 import { connectKeyValue, type KeyValueConnection } from '../upstream/client.ts';
 import { canonicalJson, sha256, type JsonValue } from './confirmationArguments.ts';
 import {
@@ -23,6 +25,8 @@ export interface ConfirmationAction {
 
 export interface ConfirmationRequest extends ConfirmationAction {
   readonly confirmationToken: string;
+  /** Remaining end-to-end request budget from the trusted caller, not model arguments. */
+  readonly requestDeadlineMs: number;
 }
 
 export interface ConfirmedWrite {
@@ -30,10 +34,21 @@ export interface ConfirmedWrite {
   readonly arguments: Readonly<Record<string, JsonValue>>;
   /** Ticket 47: forward unchanged as Idempotency-Key. Never send the raw confirmation value. */
   readonly idempotencyKeyHash: string;
+  /** Remaining budget after Redis claim; the writer must enforce it on outbound calls. */
+  readonly deadlineMs: number;
+}
+
+export interface ConfirmationStoredResult {
+  readonly id: string;
+  readonly status?: string;
 }
 
 export type ConfirmationResult =
-  | { readonly state: 'done'; readonly result: JsonValue; readonly replayed: boolean }
+  | {
+      readonly state: 'done';
+      readonly result: ConfirmationStoredResult;
+      readonly replayed: boolean;
+    }
   | { readonly state: 'in_progress'; readonly retryAfterMs: number };
 
 export interface ConfirmationStoreOptions {
@@ -43,34 +58,28 @@ export interface ConfirmationStoreOptions {
   readonly commandTimeoutMs?: number;
 }
 
-export class ConfirmationError extends Error {
-  readonly code:
-    | 'invalid_confirmation'
-    | 'confirmation_store_unavailable'
-    | 'confirmation_attempt_lost';
-  constructor(
-    code: 'invalid_confirmation' | 'confirmation_store_unavailable' | 'confirmation_attempt_lost'
-  ) {
-    super(
-      code === 'invalid_confirmation'
-        ? 'This confirmation is invalid or expired.'
-        : 'The confirmation could not be completed. Retry with the same confirmation.'
-    );
-    this.name = 'ConfirmationError';
-    this.code = code;
-  }
-}
-
 const KEY_PREFIX = 'mcp:confirmation:v1:';
 
 function duration(value: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
-    throw new TypeError('Invalid confirmation duration');
+    throw invalidInput('confirmation_options', 'positive_bounded_duration');
   }
   return value;
 }
 
+function invalidInput(field: string, constraint: string): McpError {
+  return new McpError({ class: 'invalid_input', field, constraint });
+}
+
 function snapshot(action: ConfirmationAction) {
+  try {
+    return readSnapshot(action);
+  } catch {
+    throw invalidInput('confirmation_action', 'valid_binding_and_json_arguments');
+  }
+}
+
+function readSnapshot(action: ConfirmationAction) {
   const identity = [
     action.binding.userId,
     action.binding.assistantId,
@@ -104,7 +113,7 @@ export function createConfirmationStore(
   const resultTtlMs = duration(options.resultTtlMs ?? 86_400_000, 86_400_000);
   const commandTimeoutMs = duration(options.commandTimeoutMs ?? 1_000, 60_000);
   if (resultTtlMs < lifetimeMs)
-    throw new TypeError('Result retention must cover the confirmation lifetime');
+    throw invalidInput('resultTtlMs', 'must_cover_confirmation_lifetime');
 
   async function evaluate(script: string, key: string, args: string[]): Promise<string[]> {
     try {
@@ -138,8 +147,14 @@ export function createConfirmationStore(
     request: ConfirmationRequest,
     write: (input: ConfirmedWrite) => Promise<JsonValue>
   ): Promise<ConfirmationResult> {
+    const startedAt = performance.now();
     const bound = snapshot(request);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(request.confirmationToken)) {
+    const requestDeadlineMs = duration(request.requestDeadlineMs, leaseMs - 1);
+    if (typeof write !== 'function') throw invalidInput('writer', 'function_required');
+    if (
+      typeof request.confirmationToken !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(request.confirmationToken)
+    ) {
       throw new ConfirmationError('invalid_confirmation');
     }
     const idempotencyKeyHash = sha256(request.confirmationToken);
@@ -156,11 +171,15 @@ export function createConfirmationStore(
 
     // A timeout may follow a committed write. Keep in_progress: the next lease uses the SAME key.
     // Ticket 49 must recheck live grant + scope before execute(), including cached-result reads.
-    const result = await write({
+    const deadlineMs = Math.floor(requestDeadlineMs - (performance.now() - startedAt));
+    if (deadlineMs <= 0) throw new ConfirmationError('confirmation_write_failed');
+    const result = await runWriter(write, {
       arguments: JSON.parse(bound.json) as Record<string, JsonValue>,
       idempotencyKeyHash,
+      deadlineMs,
     });
-    const resultJson = canonicalJson(result, 65_536);
+    const projected = projectResult(result);
+    const resultJson = canonicalJson(projected, 2_048);
     const completed = await evaluate(COMPLETE_CONFIRMATION, key, [
       ...binding,
       owner,
@@ -168,13 +187,14 @@ export function createConfirmationStore(
       String(resultTtlMs),
     ]);
     if (completed[0] !== 'completed') throw new ConfirmationError('confirmation_attempt_lost');
-    return { state: 'done', result: JSON.parse(resultJson) as JsonValue, replayed: false };
+    return { state: 'done', result: projected, replayed: false };
   }
 
   return { issue, execute };
 }
 
 function readClaimResult(reply: string[]): ConfirmationResult {
+  if (reply[0] === 'mismatch') throw new ConfirmationError('confirmation_mismatch');
   if (reply[0] === 'invalid') throw new ConfirmationError('invalid_confirmation');
   if (
     reply[0] === 'in_progress' &&
@@ -184,18 +204,65 @@ function readClaimResult(reply: string[]): ConfirmationResult {
     return { state: 'in_progress', retryAfterMs: Number(reply[1]) };
   }
   if (reply[0] === 'done' && reply[1] !== undefined) {
-    try {
-      const result: unknown = JSON.parse(reply[1]);
-      return {
-        state: 'done',
-        result: JSON.parse(canonicalJson(result, 65_536)) as JsonValue,
-        replayed: true,
-      };
-    } catch {
-      throw new ConfirmationError('confirmation_store_unavailable');
-    }
+    return readCompletedResult(reply[1]);
   }
   throw new ConfirmationError('confirmation_store_unavailable');
+}
+
+function readCompletedResult(json: string): ConfirmationResult {
+  try {
+    const result: unknown = JSON.parse(json);
+    return { state: 'done', result: projectResult(result), replayed: true };
+  } catch {
+    throw new ConfirmationError('confirmation_store_unavailable');
+  }
+}
+
+/** Allowlist applies on both completion and replay, including records written by older code. */
+function projectResult(value: unknown): ConfirmationStoredResult {
+  try {
+    assertResultObject(value);
+    const id: unknown = Object.getOwnPropertyDescriptor(value, 'id')?.value;
+    if (typeof id !== 'string' || id.length === 0 || id.length > 256) throw new Error();
+    const status = projectedStatus(value);
+    return { id, ...status };
+  } catch {
+    throw new ConfirmationError('confirmation_result_invalid');
+  }
+}
+
+function assertResultObject(value: unknown): asserts value is object {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error();
+}
+
+function projectedStatus(value: object): { status?: string } {
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'status');
+  if (descriptor === undefined) return {};
+  const status: unknown = descriptor.value;
+  if (typeof status !== 'string' || status.length === 0 || status.length > 64) throw new Error();
+  return { status };
+}
+
+async function runWriter(
+  write: (input: ConfirmedWrite) => Promise<JsonValue>,
+  input: ConfirmedWrite
+): Promise<JsonValue> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      write(input),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new ConfirmationError('confirmation_write_failed'));
+        }, input.deadlineMs);
+      }),
+    ]);
+  } catch (error) {
+    if (error instanceof McpError) throw error;
+    throw new ConfirmationError('confirmation_write_failed');
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export type ConfirmationStore = ReturnType<typeof createConfirmationStore>;
@@ -205,7 +272,12 @@ export async function connectConfirmationStore(
   url: string,
   options: ConfirmationStoreOptions = {}
 ) {
-  const connection = await connectKeyValue(url, options.commandTimeoutMs ?? 1_000);
+  let connection: KeyValueConnection;
+  try {
+    connection = await connectKeyValue(url, options.commandTimeoutMs ?? 1_000);
+  } catch {
+    throw new ConfirmationError('confirmation_store_unavailable');
+  }
   try {
     return { ...createConfirmationStore(connection, options), close: connection.close };
   } catch (error) {
