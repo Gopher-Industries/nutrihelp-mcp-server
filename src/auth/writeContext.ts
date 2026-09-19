@@ -90,8 +90,9 @@ export function writeUnavailable(context: WriteContext, code: string): McpError 
 }
 
 export function remainingWriteBudget(context: WriteContext): number {
-  const remaining = context.deadlineAt - context.now();
-  if (remaining <= 0) throw writeUnavailable(context, 'deadline_exhausted');
+  const remaining = Math.floor(context.deadlineAt - context.now());
+  if (!Number.isSafeInteger(remaining) || remaining <= 0)
+    throw writeUnavailable(context, 'deadline_exhausted');
   return remaining;
 }
 

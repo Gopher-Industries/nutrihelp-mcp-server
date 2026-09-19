@@ -17,6 +17,9 @@ export async function frameToolResult(run: () => Promise<CallToolResult>): Promi
       return {
         isError: error.class === 'invalid_input',
         content: [{ type: 'text', text: JSON.stringify(payload) }],
+        // Confirmation is a declared tool response, so the SDK needs structured output
+        // as well as text. Log-only mismatch details must stay out of both.
+        ...(error.class === 'confirmation_required' ? { structuredContent: payload } : {}),
       };
     }
     throw new ProtocolError(PROTOCOL_ERROR_CODES[error.class], payload.message, payload);

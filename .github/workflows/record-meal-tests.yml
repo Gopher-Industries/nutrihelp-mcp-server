@@ -34,4 +34,4 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
-      - run: npm run test:record-meal:redis
+      - run: npm run test:integration

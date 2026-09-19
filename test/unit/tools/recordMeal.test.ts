@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as upstreamClient from '../../../src/upstream/client.ts';
+import { recordedMealSchema } from '../../../src/mealLog/schema.ts';
+import type { WriteContext } from '../../../src/auth/writeContext.ts';
 import { handler } from '../../../src/tools/recordMeal.ts';
 import { ConfirmationError, type ConfirmationStore } from '../../../src/auth/confirmationStore.ts';
 import { sha256 } from '../../../src/auth/confirmationArguments.ts';
@@ -19,10 +22,11 @@ beforeEach(() => {
   upstream = installUpstreamMock([]);
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await upstream.restore();
 });
 
-function setup() {
+function setup(contextOverrides: Partial<WriteContext> = {}, writerBudgetMs?: number) {
   const confirmations = {
     issue: vi
       .fn<ConfirmationStore['issue']>()
@@ -30,14 +34,17 @@ function setup() {
     execute: vi.fn<ConfirmationStore['execute']>().mockImplementation(async (request, write) => ({
       state: 'done',
       replayed: false,
-      result: await write({
-        arguments: request.arguments as typeof meal,
-        idempotencyKeyHash: sha256(request.confirmationToken),
-      }),
+      result: recordedMealSchema.parse(
+        await write({
+          arguments: request.arguments as typeof meal,
+          idempotencyKeyHash: sha256(request.confirmationToken),
+          deadlineMs: writerBudgetMs ?? request.requestDeadlineMs - 1,
+        })
+      ),
     })),
   };
   const services = servicesFor(confirmations);
-  const context = verifiedContext();
+  const context = verifiedContext(contextOverrides);
   return { services, context, call: handler(mealConfig, context, services) };
 }
 
@@ -46,6 +53,91 @@ function reply(status = 201, body: object | string = { success: true, data: stor
 }
 
 describe('record_meal', () => {
+  it('passes the remaining trusted request budget after audit to the store', async () => {
+    let now = Date.now();
+    const { call, services } = setup({ now: () => now, deadlineAt: now + 2000 });
+    services.auditStarted.mockImplementation(() => {
+      now += 250;
+      return Promise.resolve();
+    });
+    services.confirmations.execute.mockResolvedValue({ state: 'in_progress', retryAfterMs: 1000 });
+    await call({ ...meal, confirmation_token: confirmationToken });
+    expect(services.confirmations.execute.mock.calls[0]?.[0].requestDeadlineMs).toBe(1750);
+  });
+
+  it('uses the post-claim deadline for exchange, introspection and the HTTP write', async () => {
+    let now = Date.now();
+    const { call, services } = setup({ now: () => now, deadlineAt: now + 2000 }, 500);
+    const post = vi.spyOn(upstreamClient, 'postMealLog');
+    services.exchangeCredential.mockImplementation(() => {
+      now += 150;
+      return Promise.resolve('backend-token');
+    });
+    services.revocation.assertGrantActive
+      .mockResolvedValueOnce(activeGrant)
+      .mockResolvedValueOnce(activeGrant)
+      .mockImplementationOnce(() => {
+        now += 100;
+        return Promise.resolve(activeGrant);
+      });
+    reply();
+    await call({ ...meal, confirmation_token: confirmationToken });
+    const exchangeBudget = services.exchangeCredential.mock.calls[0]?.[0].deadlineMs;
+    const grantBudget = services.revocation.assertGrantActive.mock.calls[2]?.[0].deadlineMs;
+    const writeBudget = post.mock.calls[0]?.[0].deadlineMs;
+    expect(exchangeBudget).toBeGreaterThan(0);
+    expect(exchangeBudget).toBeLessThanOrEqual(500);
+    expect(grantBudget).toBeGreaterThan(0);
+    expect(grantBudget).toBeLessThanOrEqual(350);
+    expect(writeBudget).toBeGreaterThan(0);
+    expect(writeBudget).toBeLessThanOrEqual(250);
+  });
+
+  it('does not start a backend write if exchange exhausts the post-claim budget', async () => {
+    let now = Date.now();
+    const { call, services } = setup({ now: () => now, deadlineAt: now + 2000 }, 100);
+    services.exchangeCredential.mockImplementation(() => {
+      now += 101;
+      return Promise.resolve('backend-token');
+    });
+    await expect(call({ ...meal, confirmation_token: confirmationToken })).rejects.toMatchObject({
+      code: -32004,
+    });
+    expect(upstream.wireCalls()).toHaveLength(0);
+  });
+
+  it('does not extend the original HTTP deadline when the writer is handed a larger budget', async () => {
+    let now = Date.now();
+    const { call, services } = setup({ now: () => now, deadlineAt: now + 100 }, 2000);
+    services.exchangeCredential.mockImplementation(() => {
+      now += 101;
+      return Promise.resolve('backend-token');
+    });
+    await expect(call({ ...meal, confirmation_token: confirmationToken })).rejects.toMatchObject({
+      code: -32004,
+    });
+    expect(upstream.wireCalls()).toHaveLength(0);
+  });
+
+  it.each([
+    { id: 'invalid', status: 'recorded' },
+    { id: '9223372036854775808', status: 'recorded' },
+    { id: storedMeal.id },
+    { id: storedMeal.id, status: 'failed' },
+  ])('rejects an invalid cached receipt %j without claiming success', async (receipt) => {
+    const { call, services } = setup();
+    services.confirmations.execute.mockResolvedValue({
+      state: 'done',
+      replayed: true,
+      result: receipt,
+    });
+    await expect(call({ ...meal, confirmation_token: confirmationToken })).rejects.toMatchObject({
+      code: -32004,
+    });
+    expect(services.exchangeCredential).not.toHaveBeenCalled();
+    expect(upstream.wireCalls()).toHaveLength(0);
+  });
+
   it('previews exact fields, binds every identity and does not write or exchange on proposal', async () => {
     const { call, services } = setup();
     const args = { ...meal, sodium: null, carbs: 0 };
@@ -77,7 +169,7 @@ describe('record_meal', () => {
       data: { ...storedMeal, user_id: '7', idempotency_key_hash: 'secret' },
     });
     const response = await call({ ...meal, confirmation_token: confirmationToken });
-    expect(response.structuredContent).toEqual({ status: 'recorded', record: storedMeal });
+    expect(response.structuredContent).toEqual({ status: 'recorded', id: storedMeal.id });
     expect(services.revocation.assertGrantActive).toHaveBeenCalledTimes(3);
     expect(services.auditStarted.mock.invocationCallOrder[0]).toBeLessThan(
       services.exchangeCredential.mock.invocationCallOrder[0] ?? 0
@@ -105,7 +197,7 @@ describe('record_meal', () => {
     reply(200);
     expect(
       (await call({ ...meal, confirmation_token: confirmationToken })).structuredContent
-    ).toEqual({ status: 'recorded', record: storedMeal });
+    ).toEqual({ status: 'recorded', id: storedMeal.id });
   });
 
   it.each([
@@ -132,11 +224,11 @@ describe('record_meal', () => {
     services.confirmations.execute.mockResolvedValue({
       state: 'done',
       replayed: true,
-      result: { status: 'recorded', record: storedMeal },
+      result: { status: 'recorded', id: storedMeal.id },
     });
     expect(
       (await call({ ...meal, confirmation_token: confirmationToken })).structuredContent
-    ).toEqual({ status: 'recorded', record: storedMeal });
+    ).toEqual({ status: 'recorded', id: storedMeal.id });
     expect(services.revocation.assertGrantActive).toHaveBeenCalledTimes(2);
     expect(services.exchangeCredential).not.toHaveBeenCalled();
     expect(upstream.wireCalls()).toHaveLength(0);
@@ -157,6 +249,8 @@ describe('record_meal', () => {
     { email: 'other@example.test' },
     { ingredients: [] },
     { idempotency_key_hash: 'x' },
+    { requestDeadlineMs: 50000 },
+    { deadlineMs: 50000 },
     { date: '2026-02-30' },
     { date: '0000-01-01' },
     { time: '25:00' },
@@ -288,21 +382,37 @@ describe('record_meal', () => {
 
   it.each([
     'invalid_confirmation',
+    'confirmation_mismatch',
     'confirmation_store_unavailable',
     'confirmation_attempt_lost',
+    'confirmation_write_failed',
+    'confirmation_result_invalid',
   ] as const)('sanitizes confirmation failure %s', async (code) => {
     const { call, services } = setup();
     services.confirmations.execute.mockRejectedValue(new ConfirmationError(code));
     const operation = call({ ...meal, confirmation_token: confirmationToken });
-    if (code === 'invalid_confirmation') expect((await operation).isError).toBe(true);
-    else await expect(operation).rejects.toMatchObject({ code: -32004 });
+    if (code === 'invalid_confirmation' || code === 'confirmation_mismatch') {
+      const response = await operation;
+      expect(response.isError).toBe(false);
+      expect(response.content).toEqual([
+        { type: 'text', text: JSON.stringify(new ConfirmationError(code).toModel()) },
+      ]);
+      expect(JSON.stringify(response)).not.toContain(confirmationToken);
+      expect(JSON.stringify(response)).not.toContain(code);
+    } else await expect(operation).rejects.toMatchObject({ code: -32004 });
     expect(upstream.wireCalls()).toHaveLength(0);
   });
 
   it('reports a backend key conflict without overwriting or silently issuing a new confirmation', async () => {
     const { call, services } = setup();
     reply(409, { message: 'private detail' });
-    expect((await call({ ...meal, confirmation_token: confirmationToken })).isError).toBe(true);
+    const response = await call({ ...meal, confirmation_token: confirmationToken });
+    expect(response.content).toEqual([
+      {
+        type: 'text',
+        text: JSON.stringify(new ConfirmationError('confirmation_mismatch').toModel()),
+      },
+    ]);
     expect(services.confirmations.issue).not.toHaveBeenCalled();
     expect(upstream.callsTo('/api/meallog/me')).toHaveLength(1);
   });

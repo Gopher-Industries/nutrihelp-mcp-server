@@ -39,7 +39,7 @@ export const recordMealInputSchema = mealInputSchema.extend({
     .optional(),
 });
 
-/** Allowlist: discard backend-only fields before caching or returning a saved record. */
+/** Validate the backend record before retaining only the minimal confirmation receipt. */
 export const savedMealSchema = z.object({
   id: z
     .string()
@@ -58,7 +58,7 @@ export const savedMealSchema = z.object({
 
 export const recordedMealSchema = z.object({
   status: z.literal('recorded'),
-  record: savedMealSchema,
+  id: savedMealSchema.shape.id,
 });
 
 export const recordMealOutputSchema = z.union([
@@ -71,6 +71,12 @@ export const recordMealOutputSchema = z.union([
     expires_at: z.number(),
   }),
   recordedMealSchema,
+  // A rejected/expired confirmation has no usable token. Keep the existing error taxonomy.
+  z.object({
+    class: z.literal('confirmation_required'),
+    summary: z.string(),
+    confirmation_token: z.literal(''),
+  }),
   z.object({
     status: z.literal('in_progress'),
     retry_after_ms: z.number().positive(),

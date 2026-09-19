@@ -29,17 +29,9 @@ function result(value: z.infer<typeof recordMealOutputSchema>) {
   };
 }
 
-function invalidConfirmation(): McpError {
-  return new McpError({
-    class: 'invalid_input',
-    field: 'confirmation_token',
-    constraint: 'Use the original unexpired confirmation with exactly the same meal arguments.',
-  });
-}
-
 function assertBackendSuccess(status: number, context: WriteContext): void {
   if (status === 200 || status === 201) return;
-  if (status === 409) throw invalidConfirmation();
+  if (status === 409) throw new ConfirmationError('confirmation_mismatch');
   if (status === 400)
     throw new McpError({
       class: 'invalid_input',
@@ -73,29 +65,38 @@ async function saveMeal(
   services: RecordMealServices,
   config: RecordMealConfig
 ) {
+  // The store subtracts Redis claim time. Preserve that smaller budget through exchange,
+  // live authorization and the HTTP write; each async step consumes the same deadline.
+  const startedAt = context.now();
+  const monotonicStart = performance.now();
+  const writeContext: WriteContext = {
+    ...context,
+    deadlineAt: Math.min(context.deadlineAt, startedAt + input.deadlineMs),
+    now: () => Math.max(context.now(), startedAt + (performance.now() - monotonicStart)),
+  };
   const meal = mealInputSchema.parse(input.arguments);
   const credential = await services.exchangeCredential({
     subjectToken: context.token,
     scope: MEAL_LOG_WRITE_SCOPE,
     correlationId: context.correlationId,
-    deadlineMs: remainingWriteBudget(context),
+    deadlineMs: remainingWriteBudget(writeContext),
   });
   if (!credential || credential === context.token)
     throw writeUnavailable(context, 'backend_credential_unavailable');
   // Exchange may take time. Recheck immediately before the write, after every async precondition.
-  await assertMealWriteAuthorized(context, services.revocation);
+  await assertMealWriteAuthorized(writeContext, services.revocation);
   const response = await postMealLog({
     baseUrl: config.nutrihelpApiBaseUrl,
     meal,
     credential,
     idempotencyKeyHash: input.idempotencyKeyHash,
     correlationId: context.correlationId,
-    deadlineMs: remainingWriteBudget(context),
+    deadlineMs: remainingWriteBudget(writeContext),
   });
   assertBackendSuccess(response.status, context);
   const parsed = backendResponse.safeParse(await response.json());
   if (!parsed.success) throw writeUnavailable(context, 'backend_response_invalid');
-  return { status: 'recorded' as const, record: parsed.data.data };
+  return { id: parsed.data.data.id, status: 'recorded' as const };
 }
 
 async function run(
@@ -144,8 +145,9 @@ async function run(
       expires_at: proposal.expiresAt,
     });
   }
-  const saved = await services.confirmations.execute({ ...action, confirmationToken }, (input) =>
-    saveMeal(input, context, services, config)
+  const saved = await services.confirmations.execute(
+    { ...action, confirmationToken, requestDeadlineMs: remainingWriteBudget(context) },
+    (input) => saveMeal(input, context, services, config)
   );
   if (saved.state === 'in_progress')
     return result({
@@ -170,13 +172,7 @@ export function handler(
   return (args: unknown) =>
     frameToolResult(async () => {
       if (services === undefined) throw writeUnavailable(context, 'record_meal_not_configured');
-      try {
-        return await run(args, context, services, config);
-      } catch (error) {
-        if (error instanceof ConfirmationError && error.code === 'invalid_confirmation')
-          throw invalidConfirmation();
-        throw error;
-      }
+      return run(args, context, services, config);
     });
 }
 
