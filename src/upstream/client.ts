@@ -1,10 +1,12 @@
 /** The single egress module for NutriHelp HTTP and Render Key Value connections.
  * Supports unauthenticated GET and declared query assembly with identity filtering.
- * Credential attachment and retry with backoff/jitter remain future work.
+ * Confirmed meal writes accept only a backend credential supplied by the exchange adapter.
+ * An uncertain write is retried through the confirmation store, never automatically here.
  * Do not improvise outbound policy in a caller.
  */
 
 import { createClient } from '@redis/client';
+import { mealInputSchema, type MealSnapshot } from '../mealLog/schema.ts';
 
 /** Inbound correlation id, or a freshly minted id when none was supplied. */
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
@@ -361,4 +363,70 @@ export async function fetchUpstream(request: UpstreamRequest): Promise<Response>
     correlationId: request.correlationId,
     redirect: 'error',
   });
+}
+/** A single confirmed snapshot. The path and headers are never selected by tool input. */
+export interface MealLogWriteRequest {
+  readonly baseUrl: string;
+  readonly meal: MealSnapshot;
+  /** Exchanged backend credential from the trusted auth adapter, not an MCP access token. */
+  readonly credential: string;
+  readonly idempotencyKeyHash: string;
+  readonly correlationId: string;
+  readonly deadlineMs: number;
+}
+
+async function boundedMealResponse(response: Response): Promise<Response> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new TypeError('Meal response is empty');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const bytes: unknown = next.value;
+      if (!(bytes instanceof Uint8Array)) throw new TypeError('Invalid meal response chunk');
+      size += bytes.byteLength;
+      if (size > 32 * 1024) throw new TypeError('Meal response exceeds its limit');
+      chunks.push(bytes);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return new Response(Buffer.concat(chunks), {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+
+export async function postMealLog(request: MealLogWriteRequest): Promise<Response> {
+  const base = new URL(request.baseUrl);
+  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) {
+    throw new TypeError('Meal log writes require the configured HTTPS backend');
+  }
+  if (
+    !/^[0-9a-f]{64}$/.test(request.idempotencyKeyHash) ||
+    !/^[A-Za-z0-9\-._~+/]+=*$/.test(request.credential)
+  ) {
+    throw new TypeError('A backend credential and confirmation digest are required');
+  }
+  if (!Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= 0) {
+    throw new TypeError('A positive remaining deadline is required');
+  }
+  const meal = mealInputSchema.parse(request.meal);
+  const response = await fetch(new URL('/api/meallog/me', base), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      authorization: `Bearer ${request.credential}`,
+      'Idempotency-Key': request.idempotencyKeyHash,
+      [CORRELATION_ID_HEADER]: request.correlationId,
+    },
+    body: JSON.stringify(meal),
+    redirect: 'error',
+    signal: AbortSignal.timeout(request.deadlineMs),
+  });
+  // No transparent retries: only the confirmation store may reclaim an uncertain attempt.
+  return boundedMealResponse(response);
 }
