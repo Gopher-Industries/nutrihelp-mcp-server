@@ -1,6 +1,5 @@
 /** The single point through which every outbound call to the NutriHelp backend passes.
- * Supports unauthenticated GET and declared query assembly with identity filtering.
- * Credential attachment and retry with backoff/jitter remain future work.
+ * Supports unauthenticated GET and authenticated GET with declared query assembly and identity filtering.
  * Do not improvise outbound policy in a caller.
  */
 
@@ -19,6 +18,7 @@ const FORWARDABLE_REQUEST_HEADERS = new Set([
   'if-none-match',
   'if-modified-since',
 ]);
+
 export const IDENTITY_DENY_LIST = [
   'user_id',
   'userId',
@@ -37,22 +37,15 @@ export const IDENTITY_DENY_LIST = [
 ] as const;
 
 const NORMALIZED_IDENTITY_FIELDS = new Set(IDENTITY_DENY_LIST.map(normalizeFieldName));
+
 export interface UnauthenticatedGetOptions {
   readonly url: string | URL;
-  /** Remaining request budget in ms. `undefined` means no timeout. Key is required so omission is visible. */
   readonly deadlineMs: number | undefined;
-  /** Inbound request id, or `undefined` to mint one that does not join. Key required for the same reason. */
   readonly correlationId: string | undefined;
-  /** Filtered through FORWARDABLE_REQUEST_HEADERS. Correlation id is set after, so it cannot be overridden. */
   readonly headers?: Headers;
-  /**
-   * Required: fetch defaults to `follow`. Key-set fetches must pass `manual`.
-   * Literal union, not DOM `RequestRedirect` — adding DOM lib would make `self` a live egress binding.
-   */
   readonly redirect: 'error' | 'follow' | 'manual';
 }
 
-/** Refuse budgets `AbortSignal.timeout` cannot honour (≤0 or non-finite). */
 function assertUsableDeadline(deadlineMs: number | undefined): void {
   if (deadlineMs === undefined) return;
 
@@ -61,11 +54,6 @@ function assertUsableDeadline(deadlineMs: number | undefined): void {
   }
 }
 
-/**
- * Same check without the absent-deadline hatch. Auth-server calls must always be bounded;
- * an absent deadline attaches no abort signal. Kept separate from `assertUsableDeadline`:
- * the key-set GET may run unbounded; one shared optional helper would re-open the hatch.
- */
 function requireUsableDeadline(deadlineMs: number): void {
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
     throw new TypeError(
@@ -76,18 +64,19 @@ function requireUsableDeadline(deadlineMs: number): void {
 }
 
 /**
- * GET with no credential. Headers are allowlisted, so Authorization/Cookie never reach the wire.
- * No query/body assembly, so the identity deny-list does not apply on this path.
+ * GET with no credential.
  */
 export async function getWithoutCredential(options: UnauthenticatedGetOptions): Promise<Response> {
   assertUsableDeadline(options.deadlineMs);
 
   const headers = new Headers();
+
   options.headers?.forEach((value, name) => {
     if (FORWARDABLE_REQUEST_HEADERS.has(name.toLowerCase())) {
       headers.set(name, value);
     }
   });
+
   headers.set(CORRELATION_ID_HEADER, options.correlationId ?? crypto.randomUUID());
 
   return fetch(String(options.url), {
@@ -99,29 +88,55 @@ export async function getWithoutCredential(options: UnauthenticatedGetOptions): 
       : { signal: AbortSignal.timeout(options.deadlineMs) }),
   });
 }
+
+/**
+ * GET with the authenticated user's access token.
+ */
+export interface AuthenticatedGetOptions {
+  readonly url: string | URL;
+  readonly accessToken: string;
+  readonly deadlineMs: number;
+  readonly correlationId: string | undefined;
+  readonly redirect: 'error' | 'follow' | 'manual';
+}
+
+export async function getWithCredential(options: AuthenticatedGetOptions): Promise<Response> {
+  requireUsableDeadline(options.deadlineMs);
+
+  if (options.accessToken.trim() === '') {
+    throw new TypeError('Upstream access token must be a non-empty value');
+  }
+
+  const headers = new Headers({
+    authorization: `Bearer ${options.accessToken}`,
+  });
+
+  headers.set(CORRELATION_ID_HEADER, options.correlationId ?? crypto.randomUUID());
+
+  return fetch(String(options.url), {
+    method: 'GET',
+    headers,
+    redirect: options.redirect,
+    signal: AbortSignal.timeout(options.deadlineMs),
+  });
+}
+
 export interface FormPostOptions {
   readonly url: string | URL;
-  /** Server-assembled named fields. Never a caller's argument bag. */
   readonly form: Readonly<Record<string, string>>;
-  /**
-   * Remaining request-budget slice, in ms. Required: there is no unbounded form of this call.
-   * The key-set GET keeps an optional deadline; that is a different contract.
-   */
   readonly deadlineMs: number;
-  /** Inbound request id, or `undefined` to mint one. Key required so omission is visible. */
   readonly correlationId: string | undefined;
   readonly redirect: 'error' | 'follow' | 'manual';
 }
 
 /**
- * Form-encoded POST with no `Authorization` header. Auth-server endpoints take
- * `private_key_jwt` in the body. Identity deny-list applies and refuses loudly (a
- * server-assembled identity field is a call-site bug, not an untrusted arg to strip).
+ * Form-encoded POST with no Authorization header.
  */
 export async function postFormWithoutCredential(options: FormPostOptions): Promise<Response> {
   requireUsableDeadline(options.deadlineMs);
 
   const body = new URLSearchParams();
+
   for (const [field, value] of Object.entries(options.form)) {
     if (isIdentityField(field)) {
       throw new TypeError(
@@ -129,13 +144,16 @@ export async function postFormWithoutCredential(options: FormPostOptions): Promi
           'derived from the subject token by the issuer, never taken from a request parameter.'
       );
     }
+
     body.set(field, value);
   }
 
-  const headers = new Headers({ 'content-type': 'application/x-www-form-urlencoded' });
+  const headers = new Headers({
+    'content-type': 'application/x-www-form-urlencoded',
+  });
+
   headers.set(CORRELATION_ID_HEADER, options.correlationId ?? crypto.randomUUID());
 
-  // Unconditional: the deadline is required, so there is no arm where a signal is absent.
   return fetch(String(options.url), {
     method: 'POST',
     headers,
@@ -152,14 +170,17 @@ function normalizeFieldName(field: string): string {
 export function isIdentityField(field: string): boolean {
   return NORMALIZED_IDENTITY_FIELDS.has(normalizeFieldName(field));
 }
+
 export interface IdentityFieldStrippedEvent {
   readonly event: 'client_identity_field_stripped';
   readonly field: string;
 }
 
 export type IdentityFieldLogger = (event: IdentityFieldStrippedEvent) => void;
+
 const MAX_LOGGED_IDENTITY_FIELD_LENGTH = 128;
 const MAX_IDENTITY_WARNINGS_PER_REQUEST = 20;
+
 function logIdentityFieldStripped(event: IdentityFieldStrippedEvent): void {
   console.warn(
     JSON.stringify({
@@ -188,6 +209,7 @@ export function selectDeclaredToolParameters(
   const declared = new Set(declaredParameters);
   const selected: Record<string, string> = {};
   let identityWarnings = 0;
+
   for (const [field, value] of Object.entries(toolArguments)) {
     if (isIdentityField(field)) {
       if (identityWarnings < MAX_IDENTITY_WARNINGS_PER_REQUEST) {
@@ -195,6 +217,7 @@ export function selectDeclaredToolParameters(
           event: 'client_identity_field_stripped',
           field: field.slice(0, MAX_LOGGED_IDENTITY_FIELD_LENGTH),
         });
+
         identityWarnings += 1;
       }
 
@@ -204,6 +227,7 @@ export function selectDeclaredToolParameters(
     if (!declared.has(field)) continue;
 
     const searchValue = toSearchValue(field, value);
+
     if (searchValue !== undefined) {
       selected[field] = searchValue;
     }
@@ -211,6 +235,7 @@ export function selectDeclaredToolParameters(
 
   return selected;
 }
+
 /** Raw and decoded path segments; malformed escapes keep the raw form only. */
 function comparablePathSegments(pathname: string): string[] {
   const comparable: string[] = [];
@@ -251,11 +276,13 @@ function assertSafeUpstreamUrl(
     }
 
     const identityValue = String(value);
+
     if (identityValue !== '' && pathSegments.includes(identityValue)) {
       throw new TypeError('Client-supplied identity must not appear in the upstream path');
     }
   }
 }
+
 export interface UpstreamRequest {
   readonly baseUrl: string;
   readonly path: string;
