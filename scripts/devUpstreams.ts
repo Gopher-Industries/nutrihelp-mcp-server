@@ -82,12 +82,61 @@ const NARROW_TOKEN_SCOPES: readonly string[] = DEV_TOKEN_SCOPES.filter(
   (scope) => scope !== TOOL_SCOPES.nutrition_lookup
 );
 
-/** Rows the stand-in backend answers with. Three, so a row ceiling has something to cut. */
+/**
+ * Rows the stand-in backend answers with.
+ *
+ * Three, so a row ceiling has something to cut. Each one carries two fields the nutrition tool's
+ * allowlist does not name — `internal_id` and `supplier_email` — because an allowlist that is
+ * never handed anything to drop looks exactly like no allowlist at all. Neither reaches the
+ * model, and a run where either one does is the finding this shape exists to produce.
+ */
 function foodRows(query: string): readonly Readonly<Record<string, unknown>>[] {
   return [
-    { id: 101, name: `${query} (raw)`, calories_per_100g: 52, protein: 0.3, carbs: 14, fat: 0.2 },
-    { id: 102, name: `${query} juice`, calories_per_100g: 46, protein: 0.1, carbs: 11, fat: 0.1 },
-    { id: 103, name: `${query} sauce`, calories_per_100g: 68, protein: 0.2, carbs: 17, fat: 0.1 },
+    {
+      id: 101,
+      internal_id: 'row-101',
+      supplier_email: 'buyer@supplier.invalid',
+      category: 'fruit',
+      name: `${query} (raw)`,
+      calories: 52,
+      fat: 0.2,
+      carbohydrates: 14,
+      protein: 0.3,
+      fiber: 2.4,
+      sodium: 1,
+      sugar: 10.4,
+      serving_size: '100 g',
+    },
+    {
+      id: 102,
+      internal_id: 'row-102',
+      supplier_email: 'buyer@supplier.invalid',
+      category: 'juice',
+      name: `${query} juice`,
+      calories: 46,
+      fat: 0.1,
+      carbohydrates: 11,
+      protein: 0.1,
+      fiber: 0.2,
+      sodium: 4,
+      sugar: 9.6,
+      serving_size: '100 ml',
+    },
+    {
+      id: 103,
+      internal_id: 'row-103',
+      supplier_email: 'buyer@supplier.invalid',
+      category: 'condiment',
+      name: `${query} sauce`,
+      calories: 68,
+      fat: 0.1,
+      carbohydrates: 17,
+      protein: 0.2,
+      fiber: 1.3,
+      sodium: 2,
+      sugar: 14.8,
+      serving_size: '100 g',
+    },
   ];
 }
 
@@ -139,6 +188,26 @@ function revoked(): boolean {
   return existsSync(REVOKED_FILE);
 }
 
+/**
+ * What arrived on the backend call, in words.
+ *
+ * Three answers and not two. A tool whose backing endpoint is public is called with NO credential
+ * on purpose — exchanging one for a public read would widen the blast radius for nothing — so an
+ * absent header is the correct outcome for the nutrition tool today and must not read as an
+ * alarm. The exchanged credential is what a credentialed tool will present. Anything else is the
+ * finding: the one thing that must never appear here is the token the client sent inbound.
+ */
+function describeCredential(request: IncomingMessage): string {
+  const header = request.headers.authorization;
+  if (header === undefined || header === '') {
+    return 'none, which is correct for a public backing endpoint';
+  }
+  const presented = header.replace(/^Bearer /i, '');
+  return presented === EXCHANGED_CREDENTIAL
+    ? 'the exchanged credential'
+    : 'NOT the exchanged credential and not nothing - read this line before going further';
+}
+
 interface Address {
   readonly hostname: string;
   readonly port: number;
@@ -182,8 +251,8 @@ function authorizationServerOrigin(keySetUrl: URL): string {
 function inUseMessage(what: string, address: Address): string {
   return (
     `${address.hostname}:${String(address.port)} is already in use, so the ${what} did not ` +
-      'start and nothing was changed. Something is almost certainly already serving there — ' +
-      'stop it first, and this will print a fresh token when it restarts.'
+    'start and nothing was changed. Something is almost certainly already serving there — ' +
+    'stop it first, and this will print a fresh token when it restarts.'
   );
 }
 
@@ -244,6 +313,10 @@ async function main(): Promise<void> {
       }
 
       if (matches(request, 'POST', url, TOKEN_EXCHANGE_PATH)) {
+        // Nothing reaches this today: the only registered tool reads a public endpoint, and a
+        // public read is called with no credential on purpose. It is served anyway, because the
+        // first tool that declares a credentialed backing endpoint needs it and would otherwise
+        // fail here with a 404 that looks like a defect in the server rather than a gap here.
         await readBody(request);
         sendJson(response, 200, {
           access_token: EXCHANGED_CREDENTIAL,
@@ -270,13 +343,8 @@ async function main(): Promise<void> {
       // The tool parses `{ data: [...] }` and reads anything else as a retryable upstream
       // failure, so the envelope is part of the contract rather than decoration.
       sendJson(response, 200, { data: foodRows(url.searchParams.get('query') ?? '') });
-      const presented = (request.headers.authorization ?? '').replace(/^Bearer /i, '');
-      const which =
-        presented === EXCHANGED_CREDENTIAL
-          ? 'the exchanged credential'
-          : 'SOMETHING THAT IS NOT THE EXCHANGED CREDENTIAL';
       console.log(`${tag}${url.search}  -> 200, three rows`);
-      console.log(`                          credential presented: ${which}`);
+      console.log(`                          credential presented: ${describeCredential(request)}`);
       console.log(
         `                          correlation id: ${String(request.headers['x-correlation-id'])}`
       );
@@ -296,7 +364,12 @@ async function main(): Promise<void> {
     keySetAt.port,
     inUseMessage('authorization server', keySetAt)
   );
-  await bind(backend, backendAt.hostname, backendAt.port, inUseMessage('stand-in backend', backendAt));
+  await bind(
+    backend,
+    backendAt.hostname,
+    backendAt.port,
+    inUseMessage('stand-in backend', backendAt)
+  );
   persist?.();
 
   const tokenProfile = {
@@ -309,7 +382,9 @@ async function main(): Promise<void> {
   const token = await makeToken({ ...tokenProfile, scopes: DEV_TOKEN_SCOPES });
   const narrowToken = await makeToken({ ...tokenProfile, scopes: NARROW_TOKEN_SCOPES });
 
-  // Private key material's neighbours: the same mode as everything else this directory holds.
+  // Bearer credentials: whoever holds one is this user as far as the server is concerned, so
+  // they get the signing key's mode rather than a file's default (inert on Windows, where the
+  // directory's access list is what protects them).
   writeFileSync(TOKEN_FILE, `${token}\n`, { mode: 0o600 });
   writeFileSync(NARROW_TOKEN_FILE, `${narrowToken}\n`, { mode: 0o600 });
   writeInspectorConfig(`http://localhost:${port}/mcp`, token);
