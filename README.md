@@ -18,15 +18,48 @@ Early. The transport is real and the rest is not yet built.
 | Tools                               | One registered: `nutrition_lookup`.                                                                                                                  |
 | Lint, format, test, coverage, hooks | Installed. `npm run validate` runs them.                                                                                                             |
 
-Authentication is wired but **not yet operable**: introspection calls an authorization server that
-does not exist yet and fails closed, so every authenticated request is refused until that endpoint
-ships. Do not deploy it publicly in this state.
+Authentication is wired but **not yet operable in a deployment**: introspection calls an
+authorization server that is not deployed yet and fails closed, so every authenticated request is
+refused until that endpoint ships. Do not deploy it publicly in this state. A local run does not
+wait on it — "Local development without a backend" below stands up a stand-in and reaches a real
+tool call, which is a statement about this server and none about the one it will talk to.
 
 ## Requirements
 
 Node 24 LTS, pinned in `engines.node` and `.node-version`. Node 22 sits at the exact floor for
 type stripping and the MCP Inspector, so a loose `22` pin breaks both silently. Newer majors are
 outside the `engines` range.
+
+`npm run validate` starts with `check:node`, which refuses any other major and says so. That check
+is deliberate and not skippable: `.node-version`, `engines.node` and `@types/node` all say 24, so
+on another major the type checker and the runtime disagree about what exists.
+
+**Check which Node your shell actually has before anything else**, because a version manager that
+works in one shell often is not on `PATH` in another, and `npm` resolves `node` from `PATH`:
+
+```bash
+node --version    # want v24.x
+```
+
+If it reports something else and you use `fnm`, its alias directory holds the pinned major and can
+be put in front for the session. Git Bash on Windows, which is where this was verified:
+
+```bash
+export PATH="$HOME/AppData/Roaming/fnm/aliases/default:$PATH"
+```
+
+On Linux and macOS that directory is `$HOME/.local/share/fnm/aliases/default/bin` instead. Confirm
+the path exists before trusting either: `fnm` itself is often absent from `PATH` even where the
+installation is fine, which is the whole reason this note exists.
+
+PowerShell, where `fnm` frequently is not on `PATH` even when it is installed:
+
+```powershell
+$env:PATH = "$env:USERPROFILE\AppData\Roaming\fnm\aliases\default;$env:PATH"
+```
+
+Run that once per window, before `npm`. Calling `node` by full path is not enough on its own:
+`npm run` launches its own `node` from `PATH`, so the scripts would still see the wrong major.
 
 ## Setup
 
@@ -88,18 +121,27 @@ server will not verify a token without a reachable key set, and that key set mus
 `https:` — there is no loopback exemption and there will not be one. So a local run stands up a
 small issuer beside the server.
 
-> **This walkthrough starts the server, and stops short of a tool call.** After a token validates,
+> **This walkthrough runs the whole order and ends in a real tool call.** After a token validates,
 > the server asks the authorization server at `MCP_AUTH_SERVER_URL` whether the grant is still
-> live. The local issuer below serves a key set and nothing else, so that question has no answer
-> and every authenticated request is refused as an upstream failure (`503`) rather than reaching
-> dispatch. Steps 1 to 4 and the unauthenticated checks in step 5 hold; the authenticated check in
-> step 5 and all of step 6 need a running authorization server with introspection enabled and this
-> server's client key registered there.
+> live, checks the scope, takes an upstream credential if the tool's backing endpoint needs one,
+> and calls the backend. Step 3 stands all of it up locally — key set, introspection, exchange and
+> a stand-in backend — so nothing in this section needs the deployed NutriHelp backend, a real
+> authorization server, or a database.
+>
+> `nutrition_lookup` reads a **public** backing endpoint, so its call carries no credential and
+> the exchange endpoint is not reached. That is the intended behaviour, not a gap: exchanging a
+> credential for a public read would widen what a leak costs and buy nothing. The stand-in serves
+> the exchange anyway, for the first tool that declares otherwise.
 
-`npm run token:test` does all of it from **one RS256 key pair**: it generates the pair on first
-run and reuses it afterwards, serves it as a JWKS document over local HTTPS, and prints an access
+`npm run dev:upstreams` does all of it from **one RS256 key pair**: it generates the pair on first
+run and reuses it afterwards, serves it as a JWKS document over local HTTPS, and mints an access
 token signed by that same key. One key pair is the point — a rejected token can then only mean the
 token is wrong, never that a different key was served.
+
+**What it stands up is a stand-in, not a model of the real services.** It verifies no client
+assertion, checks no signature on the token it introspects, and hands its exchanged credential to
+anyone who asks. It is enough to drive this server through every step it performs, and it is
+evidence of nothing about the authorization server this server will talk to in a deployment.
 
 Everything it writes goes to `.dev/`, which is git-ignored: a private signing key, a TLS key and a
 token all live there. Nothing in that directory is ever committed.
@@ -130,8 +172,9 @@ NUTRIHELP_API_BASE_URL=https://127.0.0.1:9443
 `MCP_CLIENT_ASSERTION_KEY` is required too and is deliberately not in this file. It is a private
 key, so step 2 generates it into `.dev/` and step 4 hands it to the server from there.
 
-Nothing listens on `NUTRIHELP_API_BASE_URL` in this recipe, and nothing needs to: every
-authenticated request is refused at introspection before any backend call would be made.
+`NUTRIHELP_API_BASE_URL` is the stand-in backend, on a second port and served from the same
+certificate as the key set. `MCP_AUTH_SERVER_URL` and `MCP_JWKS_URL` name one origin on purpose:
+they mean different things in a deployment, and here one process answers for both.
 `MCP_CLIENT_ID` has a path because the server refuses to start if it equals
 `MCP_RESOURCE_IDENTIFIER` — client and resource are separate registrations.
 
@@ -276,14 +319,28 @@ access list that not even you can read or rewrite, and leaving the issuer unable
 files on the next run. It would also make `MSYS_NO_PATHCONV=1` load-bearing here, since a bare `/T`
 has no colon and MSYS rewrites it to `T:/`.
 
-### 3. Run the issuer, and leave it running
+### 3. Run the stand-in services, and leave them running
+
+```bash
+npm run dev:upstreams
+```
+
+It prints the address of every endpoint it serves, the issuer, the audience and a token valid for
+one hour, and it writes three files: the token to `.dev/token.txt`, a second token to
+`.dev/token-narrow-scope.txt`, and an Inspector session config to `.dev/inspector.json` carrying
+the first one. It logs every call the server makes to it, which is the point of leaving it in a
+window you can see.
+
+The second token carries every scope except the one `nutrition_lookup` requires. Step 5 uses it to
+show the scope check refusing a tool the grant does not cover, which is a different refusal from
+the token being bad.
+
+If a key set is all you want — no introspection, no exchange, no backend — the narrower issuer is
+still there, and it binds the same port, so run one or the other and not both:
 
 ```bash
 npm run token:test
 ```
-
-It prints the key set address, the issuer, the audience and a token valid for one hour, and it
-writes an Inspector session config to `.dev/inspector.json` carrying that same token.
 
 On Windows, this is the point at which the signing key exists, so this is where it can be checked:
 
@@ -346,8 +403,8 @@ curl -s -i -X POST http://localhost:3000/mcp \
         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
         "io.modelcontextprotocol/clientCapabilities":{}}}}'
 
-# with the printed token: 503 today, refused at introspection AFTER the token validated
-curl -s -i -X POST http://localhost:3000/mcp \
+# with the printed token: 200, and the listing names nutrition_lookup
+curl -s -X POST http://localhost:3000/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
@@ -356,14 +413,88 @@ curl -s -i -X POST http://localhost:3000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{
         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
         "io.modelcontextprotocol/clientCapabilities":{}}}}'
+
+# a tool call: the stand-in backend answers, and what comes back is bounded and projected
+curl -s -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: nutrition_lookup' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"nutrition_lookup","arguments":{"food":"apple"},"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
 ```
 
-`503` is the correct result in this setup: the token was accepted, and the live grant check that
-follows could not be answered, because the local issuer serves no introspection endpoint. An
-unanswerable check is the retryable class, never an authentication failure, so it is `503` rather
-than `401`. A `401` there means the token itself was refused, or that a real authorization server
-answered that the grant is no longer active. Against a running authorization server with this
-server's client key registered, the same request returns `200` listing `nutrition_lookup`.
+`200` on the listing means three things answered in order: the token verified against the key set,
+the grant check was answered `active`, and the scope the method needs was in both the token and
+the grant. The stand-in's window shows each call as it arrives — and shows a fresh introspection
+call for **every** request, `tools/list` included, which is the only way to see that the order is
+what it claims.
+
+`503` there means the token was accepted and something after it could not be asked — the retryable
+class, never an authentication failure. That is what this step returned before step 3 served
+introspection, and it is what it returns again if the stand-in is not running. A `401` means the
+token itself was refused, or that the grant is no longer active.
+
+The tool call returns what the stand-in backend served, cut to the tool's own ceiling and projected
+through its field allowlist rather than passed through. Each row the stand-in serves carries two
+fields the allowlist does not name, one of them an email address, and neither comes back — an
+allowlist that is never handed anything to drop looks exactly like no allowlist at all. The
+backend's log line names which credential arrived, and for this tool the right answer is none.
+What must never appear on that line is the token the client sent inbound.
+
+Asking for a food with several matches returns candidates and no rows, and the tool asks to be
+called again with the `id` of the one you want. Adding `"id": 101` to the arguments returns that
+one record.
+
+Two refusals are worth seeing, because they are refusals for different reasons and both look like
+"it did not work" from the client:
+
+```bash
+# a token carrying every scope but the one this tool needs: 403, before dispatch
+NARROW=$(cat .dev/token-narrow-scope.txt)
+curl -s -i -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer $NARROW" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: nutrition_lookup' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+        "name":"nutrition_lookup","arguments":{"food":"apple"},"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}' \
+  | grep -iE '^HTTP/|^www-authenticate'
+
+# the user disconnects the assistant. Nothing restarts and no cache is cleared
+touch .dev/REVOKED
+
+# the very next call, with the same good token: 401
+curl -s -i -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: nutrition_lookup' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+        "name":"nutrition_lookup","arguments":{"food":"apple"},"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}}}}' \
+  | grep -iE '^HTTP/|^www-authenticate'
+
+# reconnect: the same token works again on the next call
+rm .dev/REVOKED
+```
+
+The first is `403` with `error="insufficient_scope"`: the token is fine and the grant is live, and
+the scope the tool requires is in neither. The second is `401`: the token is still signed, still
+unexpired and still audience-correct, and the only thing that changed is the answer the
+authorization server gave. That answer is asked for on **every** request, which is why a disconnect
+takes effect on the next call rather than when something expires.
 
 **The challenge that comes back with the `401` names a URL you cannot dial in this setup, and that
 is not a fault.** It reads
@@ -376,7 +507,7 @@ scheme to `http:` and it answers — which is what the first curl above already 
 configuration the identifier and the address are the same URL and the challenge is dialable as
 printed.
 
-The same three checks in PowerShell. The envelope is built once as a hashtable and handed to
+The same checks in PowerShell. Each envelope is built once as a hashtable and handed to
 `ConvertTo-Json`, so there is no quoting to get wrong:
 
 ```powershell
@@ -392,10 +523,31 @@ $body = @{
   }
 } | ConvertTo-Json -Depth 6
 
+$callBody = @{
+  jsonrpc = '2.0'
+  id      = 2
+  method  = 'tools/call'
+  params  = @{
+    name      = 'nutrition_lookup'
+    arguments = @{ food = 'apple' }
+    _meta     = @{
+      'io.modelcontextprotocol/protocolVersion'    = '2026-07-28'
+      'io.modelcontextprotocol/clientCapabilities' = @{}
+    }
+  }
+} | ConvertTo-Json -Depth 6
+
 $headers = @{
   'Accept'               = 'application/json, text/event-stream'
   'MCP-Protocol-Version' = '2026-07-28'
   'Mcp-Method'           = 'tools/list'
+}
+
+$callHeaders = @{
+  'Accept'               = 'application/json, text/event-stream'
+  'MCP-Protocol-Version' = '2026-07-28'
+  'Mcp-Method'           = 'tools/call'
+  'Mcp-Name'             = 'nutrition_lookup'
 }
 
 # the discovery document — public, no token
@@ -411,25 +563,54 @@ try {
   "WWW-Authenticate: $($r.Headers['WWW-Authenticate'])"
 }
 
-# with the printed token: 503 today, refused at introspection AFTER the token validated
+# with the printed token: 200, and the listing names nutrition_lookup
 $authed = $headers.Clone()
 $authed['Authorization'] = "Bearer $TOKEN"
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/mcp `
+  -Headers $authed -ContentType 'application/json' -Body $body | ConvertTo-Json -Depth 8
+
+# a tool call
+$authedCall = $callHeaders.Clone()
+$authedCall['Authorization'] = "Bearer $TOKEN"
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/mcp `
+  -Headers $authedCall -ContentType 'application/json' -Body $callBody | ConvertTo-Json -Depth 8
+
+# a token carrying every scope but the one this tool needs: 403, before dispatch
+$narrow = $callHeaders.Clone()
+$narrow['Authorization'] = 'Bearer ' + (Get-Content .dev/token-narrow-scope.txt -Raw).Trim()
 try {
   Invoke-WebRequest -Method Post -Uri http://localhost:3000/mcp `
-    -Headers $authed -ContentType 'application/json' -Body $body -UseBasicParsing
+    -Headers $narrow -ContentType 'application/json' -Body $callBody -UseBasicParsing
 } catch {
   $r = $_.Exception.Response
   "$([int]$r.StatusCode) $($r.StatusDescription)"
-  (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd()
+  "WWW-Authenticate: $($r.Headers['WWW-Authenticate'])"
 }
+
+# the user disconnects the assistant. Nothing restarts and no cache is cleared
+New-Item -ItemType File .dev/REVOKED -ErrorAction SilentlyContinue | Out-Null
+
+# the very next call, with the same good token: 401
+try {
+  Invoke-WebRequest -Method Post -Uri http://localhost:3000/mcp `
+    -Headers $authedCall -ContentType 'application/json' -Body $callBody -UseBasicParsing
+} catch {
+  $r = $_.Exception.Response
+  "$([int]$r.StatusCode) $($r.StatusDescription)"
+  "WWW-Authenticate: $($r.Headers['WWW-Authenticate'])"
+}
+
+# reconnect: the same token works again on the next call
+Remove-Item .dev/REVOKED
 ```
 
-`Invoke-WebRequest` throws on any non-2xx status, so both of the answers this step is looking for
-arrive as exceptions rather than as return values. That is what the `try`/`catch` is for:
-`$_.Exception.Response` carries the status and the `WWW-Authenticate` header, and the JSON-RPC body
+`Invoke-WebRequest` throws on any non-2xx status, so every refusal this step is looking for arrives
+as an exception rather than as a return value. That is what the `try`/`catch` is for:
+`$_.Exception.Response` carries the status and the `WWW-Authenticate` header, and a JSON-RPC body
 has to be pulled off the response stream with a `StreamReader` because it is not buffered onto the
 exception. A bare `Invoke-WebRequest` with no `catch` reports `The remote server returned an error:
-(401) Unauthorized.` and throws the challenge away, which is the one part worth reading.
+(401) Unauthorized.` and throws the challenge away, which is the one part worth reading. The two
+calls that succeed use `Invoke-RestMethod` instead, which parses the JSON-RPC response for you.
 
 The native cmdlets are given rather than `curl.exe` because that is where this goes wrong under
 PowerShell. Bare `curl` is an alias for `Invoke-WebRequest`, which binds `-s` to its own
@@ -445,20 +626,21 @@ has no quoting step to get wrong.
 npm run inspect
 ```
 
-That opens the web UI on `http://localhost:6274` with `.dev/inspector.json` preloaded. With only
-the local issuer running, toggling the `nutrihelp` server on **does not connect**: the Inspector's
-first request carries the token, so it meets the same live grant check as step 5 and gets `503`.
-Against a running authorization server with this server's client key registered, it reports
-**Connected** and `MCP 2026-07-28`.
+That opens the web UI on `http://localhost:6274` with `.dev/inspector.json` preloaded, and toggling
+the `nutrihelp` server on connects. With only the narrower issuer of step 3 running it **does not
+connect**: the Inspector's first request carries the token, so it meets the same live grant check
+as step 5, and with nothing to answer that check it gets `503`.
 
 For a headless check, the same config drives the CLI:
 
 ```bash
 npx mcp-inspector --cli --config .dev/inspector.json --server nutrihelp --method initialize
+npx mcp-inspector --cli --config .dev/inspector.json --server nutrihelp --method tools/list
 ```
 
-which, once the grant check can be answered, returns this server's own name, version and
-negotiated protocol revision. An empty tool list from the Inspector is not evidence of anything:
+The first returns this server's own name, version and negotiated protocol revision
+(`"protocolVersion": "2026-07-28"`); the second returns `nutrition_lookup` with its schema.
+An empty tool list from the Inspector is not evidence of anything:
 it also reports `{"tools": []}` for a client that never connected at all, so it must never be read
 as a passing check. Evidence that the tool list works is a response the server actually sent,
 naming `nutrition_lookup`.
@@ -476,10 +658,10 @@ from a config file rather than from flags:
   negotiation, saying the server did not offer `2026-07-28`, because the `401` is buried inside
   the connect probe.
 
-The token expires after an hour. Stop the issuer and re-run `npm run token:test` for a fresh one:
+The token expires after an hour. Stop the stand-in services and start them again for a fresh one:
 the key pair is reused, so the MCP server needs no restart and the Inspector config is rewritten
-in place. Re-running it while the first issuer still holds the port refuses to start, says so, and
-changes nothing — the old token stays valid until it expires.
+in place. Starting a second copy while the first still holds the port refuses to start, says so,
+and changes nothing — the old token stays valid until it expires.
 
 ## Commands
 
@@ -499,7 +681,9 @@ npm run test:controls    # the control files that validate chains, one invocatio
 npm run test:integration # needs a backend that does not exist yet
 npm run coverage         # vitest run --coverage
 
-npm run token:test       # local issuer: serves the key set, prints a token. Leave it running
+npm run dev:upstreams    # local stand-ins for the authorization server and the backend, plus a
+                         #   token. Leave it running; it logs every call the server makes
+npm run token:test       # the same issuer with none of the other endpoints: key set and a token
 npm run inspect          # MCP Inspector against .dev/inspector.json
 
 npm run validate         # check:node + typecheck + lint + format:check + test + conformance
@@ -551,9 +735,10 @@ curl -s -X POST http://localhost:3000/mcp \
   }'
 ```
 
-Sent as written, with no `Authorization` header, that returns `401` with a Bearer challenge. With a
-valid token it is refused `503` until the authorization server's introspection endpoint exists —
-see § Status. Both are the expected responses today, not misconfigurations.
+Sent as written, with no `Authorization` header, that returns `401` with a Bearer challenge — the
+expected response, not a misconfiguration. With a valid token it returns the tool listing, provided
+something is answering the live grant check: against a deployment whose authorization server is not
+there yet it is refused `503`, and locally that is what step 3 stands up.
 
 There is no `initialize` handshake, no session identifier and no sticky routing. Every request
 stands alone.
