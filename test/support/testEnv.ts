@@ -8,6 +8,8 @@
  * fixtures as well as in configuration.
  */
 
+import { SCOPE_NAMES } from '../../src/auth/scopes.ts';
+
 export const AUTH_SERVER_ORIGIN = 'https://auth.nutrihelp.test';
 export const MCP_EXPECTED_ISSUER = AUTH_SERVER_ORIGIN;
 export const MCP_RESOURCE_IDENTIFIER = 'https://mcp.nutrihelp.test/mcp';
@@ -51,13 +53,20 @@ export const ANY_API_PATH = /^\/api\/(?!security-events)/;
 export const ALLOWED_ORIGIN = 'https://claude.ai';
 export const ALLOWED_ORIGIN_HOSTNAMES = ['claude.ai'] as const;
 
-export const SCOPES = {
-  nutritionRead: 'nutrition:read',
-  mealplanRead: 'mealplan:read',
-  meallogWrite: 'meallog:write',
-} as const;
+/**
+ * Production source of truth for the scope set, re-exported rather than restated. A fixture copy
+ * is a second hand-maintained statement of one set, and the drift is invisible because each reads
+ * complete on its own — the suites would keep passing against scope names the server no longer
+ * knows. The contents are pinned in `test/unit/auth/scopes.test.ts`, not here.
+ */
+export { SCOPES } from '../../src/auth/scopes.ts';
 
-export const ALL_SCOPES = [SCOPES.nutritionRead, SCOPES.mealplanRead, SCOPES.meallogWrite];
+/**
+ * Derived, and **frozen**: this one array object is the default `scopes` of every forged grant and
+ * of the always-active fixture, so a suite that sorted or spliced it would mutate every other
+ * suite's grant. Spread it at a call site that needs a mutable copy.
+ */
+export const ALL_SCOPES: readonly string[] = Object.freeze([...SCOPE_NAMES]);
 
 export const USER_A = 'user-a-0001';
 export const USER_B = 'user-b-0002';

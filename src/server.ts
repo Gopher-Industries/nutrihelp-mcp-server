@@ -8,6 +8,7 @@ import { protectedResourceMetadata } from './auth/metadata.ts';
 import { protectedResourceMetadataUrl } from './auth/challenge.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createRevocationChecker } from './auth/revocation.ts';
+import { createScopeGate } from './auth/scopes.ts';
 import { createUpstreamCredentialProvider } from './auth/upstreamToken.ts';
 import { createHttpApp } from './transport/http.ts';
 import { registerTools } from './tools/registry.ts';
@@ -43,6 +44,22 @@ const revocationChecker = createRevocationChecker({
   logSecurity: (event) => {
     console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
   },
+});
+
+/**
+ * Step 3. The frozen map decides what a request needs; the gate is what lets that decision see the
+ * grant introspection just established, because the transport discards it today (ticket 87).
+ *
+ * ⚠️ **`scopeGate.revocation` is what the transport is handed, never `revocationChecker`.** The
+ * gate delegates every call to the checker above and adds nothing to the answer — but wiring the
+ * bare checker would leave the scope step with no live grant to read, and it fails closed, so
+ * every scoped tool call would be refused rather than anything looking broken.
+ */
+const scopeGate = createScopeGate(revocationChecker, {
+  now: () => Date.now(),
+  // The one request budget. An entry the scope step has not taken within it is one no request is
+  // still waiting for, which is what makes evicting it free.
+  maxAgeMs: config.requestDeadlineMs,
 });
 
 /**
@@ -94,8 +111,9 @@ const app = createHttpApp({
   }),
   authorization: {
     validator: tokenValidator,
-    revocation: revocationChecker,
+    revocation: scopeGate.revocation,
     requestDeadlineMs: config.requestDeadlineMs,
+    missingScopeFor: scopeGate.missingScopeFor,
   },
   onError: (error: Error) => {
     // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.
