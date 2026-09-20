@@ -164,6 +164,31 @@ export type McpErrorLogPayload =
       readonly confirmation_token: string;
     };
 
+/**
+ * Why a request never produced a response at all — as opposed to producing one this server did
+ * not like. Measured on Node v24.19.0, where the obvious discriminator is backwards:
+ *   - unresolvable host: `TypeError: fetch failed` **with** `cause`;
+ *   - spent deadline: `TimeoutError` / `AbortError` (not a `TypeError`);
+ *   - egress door refusal: `TypeError` with **no** `cause`.
+ * Match abort by name; use `cause` to separate the transport's failure from our own door's.
+ */
+export type RequestFailureKind = 'timeout' | 'unusable_request' | 'unreachable';
+
+/**
+ * Returns the kind only: **each caller keeps its own error-code strings**, because one shared set
+ * would tell an operator that an introspection timed out when an exchange did. Lives here rather
+ * than beside a caller because a measured classification copied twice gets corrected once.
+ */
+export function classifyRequestFailure(cause: unknown): RequestFailureKind {
+  if (cause instanceof Error && (cause.name === 'TimeoutError' || cause.name === 'AbortError')) {
+    return 'timeout';
+  }
+  if (cause instanceof TypeError && cause.cause === undefined) {
+    return 'unusable_request';
+  }
+  return 'unreachable';
+}
+
 /** Omit when absent or empty. Copy so no caller reference escapes. */
 function renderUnresolvedItems(items: readonly string[] | undefined): {
   unresolved_items?: readonly string[];
