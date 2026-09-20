@@ -101,7 +101,11 @@ beforeEach(async () => {
     mcp.registerTool(
       'nutrition_lookup',
       { ...contract, inputSchema },
-      handler({ nutrihelpApiBaseUrl: NUTRIHELP_API_ORIGIN, requestDeadlineMs: 30_000 })
+      handler({
+        nutrihelpApiBaseUrl: NUTRIHELP_API_ORIGIN,
+        remainingBudgetMs: (): number => 30_000,
+        correlationId: 'client-security-suite-correlation-id',
+      })
     );
   });
 });

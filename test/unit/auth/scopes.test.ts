@@ -13,25 +13,28 @@
 import { describe, expect, it } from 'vitest';
 import type { JWTPayload } from 'jose';
 import type { McpRequestContext, McpServer } from '@modelcontextprotocol/server';
-import { registerTools } from '../../../src/tools/registry.ts';
+import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from '../../../src/tools/registry.ts';
 import {
   MEAL_LOG_WRITE_SCOPE,
+  NO_SCOPE,
   SCOPES,
   SCOPE_NAMES,
   TOOL_SCOPES,
-  createScopeGate,
+  mappedScopeFor,
   missingScopeFor,
   requiredScopeFor,
   signedScopes,
   type ScopeRouting,
 } from '../../../src/auth/scopes.ts';
-import type {
-  ActiveGrant,
-  IntrospectionRequest,
-  RevocationChecker,
-} from '../../../src/auth/revocation.ts';
+import type { ActiveGrant } from '../../../src/auth/revocation.ts';
 import { forgeActiveGrant } from '../../support/activeGrant.ts';
-import { GRANT_A, USER_A, USER_B, CLIENT_ID } from '../../support/testEnv.ts';
+import {
+  GRANT_A,
+  USER_A,
+  USER_B,
+  CLIENT_ID,
+  RESOURCE_METADATA_URL,
+} from '../../support/testEnv.ts';
 
 /** Hand-written. The one statement this file is allowed to duplicate, because pinning is its job. */
 const EXPECTED_SCOPES = {
@@ -116,6 +119,75 @@ describe('the tool-to-scope map', () => {
 
   it('does not name find_recipe, which does not re-enter v1', () => {
     expect(Object.keys(TOOL_SCOPES)).not.toContain('find_recipe');
+  });
+});
+
+/**
+ * The opt-out a descriptor declares, and the reason it is a word rather than `undefined`.
+ *
+ * A registry that read "absent from the map" as "needs no scope" dispatched a registered tool
+ * nobody had scoped, with no scope check at all. The miss and the deliberate opt-out were the same
+ * value, so nothing could tell them apart. These are the assertions that keep them apart.
+ */
+describe('the explicit no-scope declaration', () => {
+  it('is the word none, hand-written here as the pin', () => {
+    expect(NO_SCOPE).toBe('none');
+  });
+
+  it('can never collide with a scope name, because every scope carries a colon', () => {
+    expect(
+      SCOPE_NAMES,
+      'if a scope were ever named none, a descriptor declaring the opt-out would read as requiring it'
+    ).not.toContain(NO_SCOPE);
+    expect(
+      SCOPE_NAMES.every((name) => name.includes(':')),
+      'the property the line above rests on, asserted rather than assumed: resource:action is what makes the two sets disjoint by construction'
+    ).toBe(true);
+    expect(NO_SCOPE).not.toContain(':');
+  });
+
+  it('is not a value the frozen map can produce', () => {
+    expect(
+      Object.values(TOOL_SCOPES),
+      'the map states requirements. The opt-out is a descriptor declaring it has none, which is a different statement and lives in a different place'
+    ).not.toContain(NO_SCOPE);
+  });
+});
+
+/**
+ * The lookup by name, which the registry asks at registration and the routing question below wraps.
+ * One lookup, two readings of a miss — and the whole defect was that only one reading existed.
+ */
+describe('the lookup by tool name', () => {
+  it.each([
+    { name: 'nutrition_lookup', scope: SCOPES.nutritionRead },
+    { name: 'get_meal_plan', scope: SCOPES.mealplanRead },
+    { name: 'record_meal', scope: SCOPES.meallogWrite },
+  ])('answers $scope for $name', ({ name, scope }) => {
+    expect(mappedScopeFor(name)).toBe(scope);
+  });
+
+  it('answers nothing for a name the map does not carry', () => {
+    expect(
+      mappedScopeFor('drop_all_meals'),
+      'silence, which the transport reads as no requirement and the registry reads as refuse to register'
+    ).toBeUndefined();
+  });
+
+  it.each(['constructor', '__proto__', 'toString'])(
+    'answers nothing for the inherited key %s',
+    (name) => {
+      expect(mappedScopeFor(name)).toBeUndefined();
+    }
+  );
+
+  it('is the lookup the routing question uses, rather than a second one beside it', () => {
+    for (const name of [...Object.keys(TOOL_SCOPES), 'drop_all_meals', '__proto__']) {
+      expect(
+        requiredScopeFor(call(name)),
+        `${name}: two lookups over one map is the drift this file exists to prevent`
+      ).toBe(mappedScopeFor(name));
+    }
   });
 });
 
@@ -268,190 +340,14 @@ describe('the two-sided decision', () => {
   });
 });
 
-/** A checker that answers active with whatever grant the case names, recording its calls. */
-function checkerReturning(grants: ActiveGrant[]): {
-  checker: RevocationChecker;
-  calls: IntrospectionRequest[];
-} {
-  const calls: IntrospectionRequest[] = [];
-  let next = 0;
-  return {
-    calls,
-    checker: {
-      assertGrantActive: (request: IntrospectionRequest): Promise<ActiveGrant> => {
-        calls.push(request);
-        const grant = grants[Math.min(next, grants.length - 1)];
-        next += 1;
-        if (grant === undefined) throw new Error('the case named no grant');
-        return Promise.resolve(grant);
-      },
-    },
-  };
-}
-
-function introspection(token = 'token-a'): IntrospectionRequest {
-  return { token, correlationId: 'corr-1', deadlineMs: 1000 };
-}
-
-/** The fixture's hand-off lifetime, standing in for the one request budget. */
-const GATE_MAX_AGE_MS = 30_000;
-
-/** A gate with a clock the case drives, so expiry is exercised without waiting. */
-function gateWith(checker: RevocationChecker): {
-  gate: ReturnType<typeof createScopeGate>;
-  advance: (ms: number) => void;
-} {
-  let clock = 1_000_000;
-  return {
-    gate: createScopeGate(checker, { now: () => clock, maxAgeMs: GATE_MAX_AGE_MS }),
-    advance: (ms: number): void => {
-      clock += ms;
-    },
-  };
-}
-
-describe('the grant hand-off', () => {
-  it('delegates to the checker it wraps, adding nothing to the answer', async () => {
-    const grant = grantWith(['meallog:write']);
-    const { checker, calls } = checkerReturning([grant]);
-    const { gate } = gateWith(checker);
-
-    await expect(gate.revocation.assertGrantActive(introspection())).resolves.toBe(grant);
-    expect(calls, 'live introspection still runs, once, for this request').toHaveLength(1);
-  });
-
-  it('lets the scope step read the grant that introspection just established', async () => {
-    const { checker } = checkerReturning([grantWith(['meallog:write'])]);
-    const { gate } = gateWith(checker);
-
-    await gate.revocation.assertGrantActive(introspection());
-
-    expect(
-      gate.missingScopeFor(call('record_meal'), claims({ scope: 'meallog:write' })),
-      'both halves agree, so the request proceeds'
-    ).toBeUndefined();
-  });
-
-  it('refuses when the grant that ran carries less than the token claims', async () => {
-    const { checker } = checkerReturning([grantWith(['nutrition:read'])]);
-    const { gate } = gateWith(checker);
-
-    await gate.revocation.assertGrantActive(introspection());
-
-    expect(gate.missingScopeFor(call('record_meal'), claims({ scope: 'meallog:write' }))).toBe(
-      SCOPES.meallogWrite
-    );
-  });
-
-  it('refuses when no introspection ran for this request at all', () => {
-    const { checker } = checkerReturning([forgeActiveGrant()]);
-    const { gate } = gateWith(checker);
-
-    expect(
-      gate.missingScopeFor(call('record_meal'), claims({ scope: 'meallog:write' })),
-      'the transport opt-out records nothing, and a scope step with nothing to read must refuse rather than fall back to the signed claim'
-    ).toBe(SCOPES.meallogWrite);
-  });
-
-  it('does not answer one request from another connection live answer', async () => {
-    const { checker } = checkerReturning([grantWith(['meallog:write'])]);
-    const { gate } = gateWith(checker);
-
-    await gate.revocation.assertGrantActive(introspection());
-
-    expect(
-      gate.missingScopeFor(
-        call('record_meal'),
-        claims({ scope: 'meallog:write', grant_id: 'grant-b-2222' })
-      ),
-      'a grant established for connection A must not authorize a token naming connection B'
-    ).toBe(SCOPES.meallogWrite);
-  });
-
-  it('serves two requests in flight on one grant, then holds nothing', async () => {
-    const { checker } = checkerReturning([
-      grantWith(['meallog:write']),
-      grantWith(['meallog:write']),
-    ]);
-    const { gate } = gateWith(checker);
-    const scoped = claims({ scope: 'meallog:write' });
-
-    await gate.revocation.assertGrantActive(introspection('token-a'));
-    await gate.revocation.assertGrantActive(introspection('token-b'));
-
-    expect(gate.missingScopeFor(call('record_meal'), scoped)).toBeUndefined();
-    expect(
-      gate.missingScopeFor(call('record_meal'), scoped),
-      'the second in-flight request is served too'
-    ).toBeUndefined();
-    expect(
-      gate.missingScopeFor(call('record_meal'), scoped),
-      'and a third request with no introspection behind it is refused: nothing survives to be reused, so this is not a positive grant cache'
-    ).toBe(SCOPES.meallogWrite);
-  });
-
-  it('records nothing when the checker refuses, so a denied grant leaves no residue', async () => {
-    const { gate } = gateWith({
-      assertGrantActive: (): Promise<ActiveGrant> => Promise.reject(new Error('inactive')),
-    });
-
-    await expect(gate.revocation.assertGrantActive(introspection())).rejects.toThrow('inactive');
-    expect(gate.missingScopeFor(call('record_meal'), claims({ scope: 'meallog:write' }))).toBe(
-      SCOPES.meallogWrite
-    );
-  });
-
-  it('keeps an entry available for the whole of the hand-off lifetime', async () => {
-    const { checker } = checkerReturning([grantWith(['meallog:write'])]);
-    const { gate, advance } = gateWith(checker);
-
-    await gate.revocation.assertGrantActive(introspection());
-    advance(GATE_MAX_AGE_MS);
-
-    expect(
-      gate.missingScopeFor(call('record_meal'), claims({ scope: 'meallog:write' })),
-      'eviction must not reach an entry a request inside its own budget is still going to want'
-    ).toBeUndefined();
-  });
-
-  /**
-   * **The leak this bound exists for, and it is per connection rather than across connections.**
-   * A token whose identity claims disagree with the introspected grant is never matched, so its
-   * record is written and never taken — and a caller repeats that against ONE connection, so a
-   * ceiling counting connections never fires. Driven here with a single grant id on purpose: a
-   * fixture varying the grant id would exercise a dimension the defect does not live in.
-   */
-  it('drops records the scope step never took, however many arrive on one connection', async () => {
-    const { checker } = checkerReturning([grantWith(['meallog:write'])]);
-    const { gate, advance } = gateWith(checker);
-    // Every one of these is recorded under GRANT_A and taken by nothing: the caller's token names
-    // a connection the introspected grant does not.
-    const mismatched = claims({ scope: 'meallog:write', grant_id: 'grant-b-2222' });
-
-    for (let i = 0; i < 500; i += 1) {
-      await gate.revocation.assertGrantActive(introspection());
-      expect(gate.missingScopeFor(call('record_meal'), mismatched)).toBe(SCOPES.meallogWrite);
-    }
-
-    advance(GATE_MAX_AGE_MS + 1);
-    await gate.revocation.assertGrantActive(introspection());
-
-    const scoped = claims({ scope: 'meallog:write' });
-    expect(
-      gate.missingScopeFor(call('record_meal'), scoped),
-      'the one fresh record is taken'
-    ).toBeUndefined();
-    expect(
-      gate.missingScopeFor(call('record_meal'), scoped),
-      'and NOTHING is left behind it: all five hundred stale records for this same connection were dropped, which a ceiling counting connections would never have done'
-    ).toBe(SCOPES.meallogWrite);
-  });
-});
-
 /**
- * The map is only a control over what the registry actually registers. A tool registered with no
- * entry here reaches its handler with no scope requirement at all, and nothing else in the tree
- * would say so.
+ * The map is only a control over what the registry actually registers.
+ *
+ * **This used to be the ONLY thing holding that property, and it is not any more.** A tool
+ * registered with no entry here reached its handler with no scope requirement at all, and this
+ * scan was the one artifact that said so — a test, which a branch can be green without ever
+ * running. The registry now refuses to register a shipped descriptor the map does not name, at
+ * module load, so the property is structural and this stays as the readable statement of it.
  */
 describe('every registered tool is in the map', () => {
   it('names a scope for each tool the registry registers', () => {
@@ -464,7 +360,14 @@ describe('every registered tool is in the map', () => {
 
     registerTools(server, {} as McpRequestContext, {
       nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
-      requestDeadlineMs: 30_000,
+      // Nothing is dispatched here — only the registered NAMES are read — so a lookup that
+      // resolves nothing is the honest fixture.
+      authorizationFor: () => undefined,
+      resourceMetadataUrl: RESOURCE_METADATA_URL,
+      auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+      // Likewise: nothing is refused here, so there is nothing to report on either channel.
+      logSecurity: () => undefined,
+      logOperational: () => undefined,
     });
 
     expect(

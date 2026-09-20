@@ -17,7 +17,7 @@
  * invisible: every grant would simply be refused, and the suites would read as though the
  * binding check were firing correctly when it was firing on the fixture instead.
  *
- * ⚠️ The security proof of that rule must NOT use this. A forged grant proves the type is
+ * The security proof of that rule must NOT use this. A forged grant proves the type is
  * forgeable, which is already known. `test/security/auth/upstreamToken.test.ts` drives the real
  * revocation checker against the real mocked endpoint and uses what it returns.
  */

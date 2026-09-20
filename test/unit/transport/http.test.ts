@@ -13,15 +13,39 @@ import {
   CLIENT_CAPABILITIES_META_KEY,
   CLIENT_INFO_META_KEY,
   PROTOCOL_VERSION_META_KEY,
+  type AuthInfo,
+  type McpRequestContext,
 } from '@modelcontextprotocol/server';
 import { errors, type JWTPayload } from 'jose';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import {
   createHttpApp,
+  type AuthorizationLookup,
   type AuthorizationOptions,
   type RequestRouting,
 } from '../../../src/transport/http.ts';
+import type {
+  UpstreamCredential,
+  UpstreamCredentialRequest,
+} from '../../../src/auth/upstreamToken.ts';
+import {
+  AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+  registerTools,
+  type AuditEnqueueEvent,
+} from '../../../src/tools/registry.ts';
+import {
+  credentialedProbe,
+  publicProbe,
+  CREDENTIALED_TOOL_NAME,
+  PUBLIC_TOOL_NAME,
+} from '../../support/credentialedTool.ts';
+import { callTool, closeLocalDispatcher, startTestServer } from '../../support/mcpClient.ts';
+import { missingScopeFor as realMissingScopeFor } from '../../../src/auth/scopes.ts';
+import { installUpstreamMock } from '../../support/upstreamMock.ts';
+import { expectToolResult } from '../../support/assertions.ts';
+import { createTestKeyPair, makeToken } from '../../../scripts/makeToken.ts';
 import type { TokenValidator } from '../../../src/auth/tokenValidator.ts';
+import { descriptor as nutritionLookupDescriptor } from '../../../src/tools/nutritionLookup.ts';
 import type {
   ActiveGrant,
   IntrospectionRequest,
@@ -37,6 +61,7 @@ import {
   CLIENT_ID,
   GRANT_A,
   MCP_AUTH_SERVER_URL,
+  MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   RESOURCE_METADATA_URL,
   SCOPES,
@@ -141,6 +166,16 @@ interface ProbeConfig {
    * introspection slice is arithmetic. Absent → real clock (distinct arm; proves default works).
    */
   readonly validationCostMs?: number;
+  /**
+   * Register tools on the per-request server, so the steps AFTER dispatch — the registry's own
+   * half of the mandatory order — are observable in the same sequence as the transport's.
+   */
+  readonly register?: (
+    server: McpServer,
+    ctx: McpRequestContext,
+    authorizationFor: AuthorizationLookup,
+    steps: string[]
+  ) => void;
 }
 
 interface ProbeRequest {
@@ -151,6 +186,10 @@ interface ProbeRequest {
   /** Defaults to the allowlisted origin. Overridden only to pin the guard that runs before all
    *  of the steps below. */
   readonly origin?: string;
+  /** JSON-RPC method in the BODY. Defaults to `tools/list`; a six-step case needs `tools/call`. */
+  readonly rpcMethod?: string;
+  /** Extra JSON-RPC params, merged under the required `_meta` envelope. */
+  readonly rpcParams?: Record<string, unknown>;
 }
 
 interface ProbeResponse {
@@ -166,8 +205,14 @@ interface Probe {
   readonly steps: readonly string[];
   /** What `onError` was told, which is all the composition root logs. */
   readonly reports: readonly string[];
-  /** The arguments the scope resolver was handed. */
-  readonly scopeArgs: readonly { routing: RequestRouting; claims: JWTPayload }[];
+  /** The arguments the scope resolver was handed, including the grant introspection established. */
+  readonly scopeArgs: readonly {
+    routing: RequestRouting;
+    claims: JWTPayload;
+    grant: ActiveGrant | undefined;
+  }[];
+  /** Every step-4 credential request, in order. Empty unless a credentialed tool dispatched. */
+  readonly credentialRequests: readonly UpstreamCredentialRequest[];
   /** Every live-introspection request, in order. Empty under the named opt-out. */
   readonly introspections: readonly IntrospectionRequest[];
   send(options?: ProbeRequest): Promise<ProbeResponse>;
@@ -177,8 +222,13 @@ interface Probe {
 async function startProbe(config: ProbeConfig): Promise<Probe> {
   const steps: string[] = [];
   const reports: string[] = [];
-  const scopeArgs: { routing: RequestRouting; claims: JWTPayload }[] = [];
+  const scopeArgs: {
+    routing: RequestRouting;
+    claims: JWTPayload;
+    grant: ActiveGrant | undefined;
+  }[] = [];
   const introspections: IntrospectionRequest[] = [];
+  const credentialRequests: UpstreamCredentialRequest[] = [];
 
   const behaviour: RevocationBehaviour = config.revocation ?? 'active';
 
@@ -224,9 +274,11 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
   };
 
   const app = createHttpApp({
-    factory: () => {
+    factory: (ctx, authorizationFor) => {
       steps.push('dispatch');
-      return new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+      const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
+      config.register?.(server, ctx, authorizationFor, steps);
+      return server;
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
     resourceMetadata: protectedResourceMetadata({
@@ -239,9 +291,24 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
       requestDeadlineMs: PROBE_REQUEST_DEADLINE_MS,
       // Injected only when a case declares a cost — otherwise the real-clock default is exercised.
       ...(config.validationCostMs === undefined ? {} : { now: (): number => clockMs }),
-      missingScopeFor: (routing: RequestRouting, claims: JWTPayload): string | undefined => {
+      credentials: {
+        credentialFor: (request: UpstreamCredentialRequest): Promise<UpstreamCredential> => {
+          steps.push('credential');
+          credentialRequests.push(request);
+          return Promise.resolve({
+            accessToken: 'probe-exchanged-credential',
+            grantId: request.grant.grantId,
+            usableUntilMs: Date.now() + 60_000,
+          });
+        },
+      },
+      missingScopeFor: (
+        routing: RequestRouting,
+        claims: JWTPayload,
+        grant: ActiveGrant | undefined
+      ): string | undefined => {
         steps.push('scope');
-        scopeArgs.push({ routing, claims });
+        scopeArgs.push({ routing, claims, grant });
         if (config.scopeThrows === true) {
           throw new Error('the injected scope resolver faulted');
         }
@@ -268,6 +335,7 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
     reports,
     scopeArgs,
     introspections,
+    credentialRequests,
     async send(options: ProbeRequest = {}): Promise<ProbeResponse> {
       const headers: Record<string, string> = {
         'content-type': 'application/json',
@@ -285,11 +353,12 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
         body: JSON.stringify({
           jsonrpc: '2.0',
           id: 1,
-          method: 'tools/list',
+          method: options.rpcMethod ?? 'tools/list',
           // The required envelope. Without it the SDK refuses at the protocol boundary before
           // dispatch, and the granting case below would read as "reached dispatch" while never
           // having done so.
           params: {
+            ...options.rpcParams,
             _meta: {
               [PROTOCOL_VERSION_META_KEY]: PROTOCOL_REVISION,
               [CLIENT_INFO_META_KEY]: { name: 'nutrihelp-order-suite', version: '1.0.0' },
@@ -350,6 +419,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await localDispatcher.close();
+  await closeLocalDispatcher();
 });
 
 describe('the mandatory order at the authorization boundary', () => {
@@ -936,5 +1006,455 @@ describe('the one request budget, shared rather than reissued', () => {
       observed,
       'and an injected fake budget, or a shrink-to-nothing, would not survive this: the real clock spends microseconds here, not seconds'
     ).toBeGreaterThan(PROBE_REQUEST_DEADLINE_MS - 5_000);
+  });
+});
+
+/**
+ * **THE SIX-STEP ORDER, END TO END, WITH SPIES.**
+ *
+ * Steps 1 to 3 run at the transport, steps 4 to 6 in the registry, and until this ticket the two
+ * halves had never been observed in one sequence — which is how a seam owned by three tickets came
+ * to be owned by none.
+ *
+ * Asserted with `toEqual` on an **exact array**. A subsequence or `toContain` assertion is
+ * satisfied by a reorder, and a reorder is the entire failure this order exists to prevent: live
+ * introspection moved after the credential lookup would let a revoked grant reach a warm cache
+ * while every "the step ran" check still passed.
+ */
+describe('the whole mandatory order, transport and registry in one sequence', () => {
+  /**
+   * `dispatch` is not a step of the order — it is the SDK boundary the request crosses between
+   * step 3 and step 4, and naming it is what makes the two halves visibly one sequence.
+   */
+  const MANDATORY_ORDER = [
+    'validate', // 1. offline, against JWKS
+    'introspect', // 2. live grant; no exemption for tools/list or a public endpoint
+    'scope', // 3. the frozen map, reading the grant step 2 returned
+    'dispatch', // — the SDK boundary
+    'credential', // 4. exchanged credential, only for a credentialed backing endpoint
+    'audit', // 5. A HOLE. Called in order; what the root supplies stores nothing
+    'handler', // 6. the tool itself
+  ];
+
+  function registerProbe(
+    steps: string[],
+    audit: AuditEnqueueEvent[]
+  ): (server: McpServer, ctx: McpRequestContext, authorizationFor: AuthorizationLookup) => void {
+    return (server, ctx, authorizationFor) => {
+      registerTools(server, ctx, {
+        nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
+        authorizationFor,
+        resourceMetadataUrl: RESOURCE_METADATA_URL,
+        auditEnqueue: (event: AuditEnqueueEvent): Promise<void> => {
+          steps.push('audit');
+          audit.push(event);
+          return Promise.resolve();
+        },
+        logSecurity: () => undefined,
+        logOperational: () => undefined,
+        extraTools: [
+          {
+            ...credentialedProbe,
+            handler: (request) => () => {
+              steps.push('handler');
+              return credentialedProbe.handler(request)();
+            },
+          },
+          {
+            ...publicProbe,
+            handler: (request) => () => {
+              steps.push('handler');
+              return publicProbe.handler(request)();
+            },
+          },
+        ],
+      });
+    };
+  }
+
+  it('runs all six in order, for a tool whose backing endpoint is credentialed', async () => {
+    const audit: AuditEnqueueEvent[] = [];
+    const p = await start({
+      validator: 'accepts',
+      register: (server, ctx, authorizationFor, steps) => {
+        registerProbe(steps, audit)(server, ctx, authorizationFor);
+      },
+    });
+
+    const response = await p.send({
+      authorization: `Bearer ${OPAQUE_CREDENTIAL}`,
+      methodHeader: 'tools/call',
+      nameHeader: CREDENTIALED_TOOL_NAME,
+      rpcMethod: 'tools/call',
+      rpcParams: { name: CREDENTIALED_TOOL_NAME, arguments: {} },
+    });
+
+    expect(response.rpcCode, 'the call was served rather than refused').toBeUndefined();
+    expect(
+      p.steps,
+      'exact equality: inserting, removing or REORDERING any step fails here, and a reorder is what a position-blind assertion cannot see'
+    ).toEqual(MANDATORY_ORDER);
+    expect(
+      audit.map((event) => [event.tool, event.grantId, typeof event.correlationId]),
+      'step 5 was handed opaque references only — never an argument and never the token'
+    ).toEqual([[CREDENTIALED_TOOL_NAME, GRANT_A, 'string']]);
+  });
+
+  /** Step 4 is per tool. A public backing endpoint must not mint one. */
+  it('skips only step 4 for a public backing endpoint, leaving the rest of the order intact', async () => {
+    const audit: AuditEnqueueEvent[] = [];
+    const p = await start({
+      validator: 'accepts',
+      register: (server, ctx, authorizationFor, steps) => {
+        registerProbe(steps, audit)(server, ctx, authorizationFor);
+      },
+    });
+
+    await p.send({
+      authorization: `Bearer ${OPAQUE_CREDENTIAL}`,
+      methodHeader: 'tools/call',
+      nameHeader: PUBLIC_TOOL_NAME,
+      rpcMethod: 'tools/call',
+      rpcParams: { name: PUBLIC_TOOL_NAME, arguments: {} },
+    });
+
+    expect(
+      p.steps,
+      'a public backing endpoint needs no login, so exchange is skipped and NOTHING ELSE moves. The two probes differ on exactly one field, so this comparison is about `backing` rather than about two unrelated tools'
+    ).toEqual(['validate', 'introspect', 'scope', 'dispatch', 'audit', 'handler']);
+    expect(p.credentialRequests, 'and no credential was minted for it').toHaveLength(0);
+    expect(
+      nutritionLookupDescriptor.backing,
+      'and the one tool this server actually ships is declared public, so the case above describes the shipped path rather than only the fixture'
+    ).toBe('public');
+  });
+
+  /**
+   * STEP 5 IS A HOLE, AND THIS IS WHERE THE SKIP IS REPORTED. It appears in the sequence above
+   * because the registry calls it; what the composition root supplies does nothing. A suite that
+   * left step 5 out of `MANDATORY_ORDER` would assert five steps while claiming six, and that is
+   * exactly the shape that reads as satisfied.
+   */
+  it('reports that step 5 durably enqueues nothing, because src/audit/logger.ts does not exist', async () => {
+    await expect(
+      AUDIT_ENQUEUE_NOT_IMPLEMENTED({ tool: 't', correlationId: 'c', grantId: 'g' }),
+      'the value the deployed root passes for step 5 accepts the event and stores it nowhere. Per the audit rule a path that skips the durable enqueue is a BYPASS, not a fallback — ticket 34 owns filling it, and this keeps the gap stated rather than assumed'
+    ).resolves.toBeUndefined();
+  });
+
+  /** The grant introspection returned reaches step 3 as its third argument, not via a hand-off. */
+  it('hands the scope step the grant that introspection just established', async () => {
+    const p = await start({ validator: 'accepts' });
+
+    await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(
+      p.scopeArgs[0]?.grant,
+      'the very object the checker returned. The transport used to discard it, which forced a connection-keyed hand-off that could answer one request from another request live answer'
+    ).toBe(ACTIVE_GRANT);
+  });
+
+  it('gives the scope step no grant when live introspection was opted out of', async () => {
+    const p = await start({ validator: 'accepts', revocation: 'disabled' });
+
+    await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(
+      p.scopeArgs[0]?.grant,
+      'a check that never ran must not present as one that passed'
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * **THE IDENTITY BINDING ITSELF, AGAINST THE TRANSPORT'S OWN MAP.**
+ *
+ * The registry suite asserts the same property against a fixture WeakMap, which proves what a
+ * WeakMap does rather than what this module built. These cases hold the real lookup — the one
+ * `createHttpApp` closes over — and the real `AuthInfo` the SDK handed the factory.
+ */
+describe('what the transport binds to a request, and what a tool can read off it', () => {
+  interface Captured {
+    readonly authInfo: AuthInfo;
+    readonly lookup: AuthorizationLookup;
+    readonly token: string;
+  }
+
+  /**
+   * Throws rather than returning optionals, so the cases below read as assertions about the
+   * binding rather than about whether anything was captured. A transport that set nothing fails
+   * here with that sentence instead of quietly passing every `?.` that follows.
+   */
+  async function capture(): Promise<Captured> {
+    const seen: { authInfo?: AuthInfo; lookup?: AuthorizationLookup } = {};
+    const p = await start({
+      validator: 'accepts',
+      register: (_server, ctx, authorizationFor) => {
+        if (ctx.authInfo !== undefined) seen.authInfo = ctx.authInfo;
+        seen.lookup = authorizationFor;
+      },
+    });
+    await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+    const { authInfo, lookup } = seen;
+    if (authInfo === undefined) throw new Error('the transport set no ctx.authInfo at all');
+    if (lookup === undefined) throw new Error('the factory was handed no authorization lookup');
+    return { authInfo, lookup, token: OPAQUE_CREDENTIAL };
+  }
+
+  it('resolves the object it created and MISSES a field-identical copy of it', async () => {
+    const { authInfo, lookup } = await capture();
+
+    expect(
+      lookup(authInfo),
+      'the granting direction: the object the transport created resolves, or every miss below is a miss against an empty map'
+    ).toBeDefined();
+    expect(
+      lookup({ ...authInfo }),
+      'a field-for-field copy is NOT a key. An argument or a _meta blob decoded from the request body can carry any fields it likes and can never carry this object identity — which is the whole anti-forgery property, and the reason it is asserted against the transport map rather than a fixture one'
+    ).toBeUndefined();
+    expect(
+      lookup(undefined),
+      'and an unauthenticated dispatch resolves nothing rather than the last request answer'
+    ).toBeUndefined();
+  });
+
+  /**
+   * **`AuthInfo.token` carries the DIGEST, and this DEVIATES from the SDK's documented meaning
+   * of the field.** It is deliberate: `ctx.authInfo` reaches every tool handler, and one open
+   * branch already forwards `ctx.authInfo.token` upstream as a Bearer credential. A digest makes
+   * that forwarding fail loudly at the backend instead of working. Do not "fix" this to the SDK
+   * convention without removing the forwarding path first.
+   */
+  it('puts the token DIGEST in AuthInfo.token, never the token itself', async () => {
+    const { authInfo, token } = await capture();
+
+    expect(
+      authInfo.token,
+      'the inbound credential must not be readable by a tool handler. It stays in RequestAuthorization, which only the registry can reach'
+    ).not.toBe(token);
+    expect(
+      authInfo.token,
+      'and what is there is the digest the live grant check minted for this exact token, so it is still a stable per-request identifier'
+    ).toBe(ACTIVE_GRANT.tokenDigest);
+  });
+
+  it('takes clientId and scopes from the GRANT rather than from the JWT claims', async () => {
+    const { authInfo } = await capture();
+
+    expect(
+      authInfo.clientId,
+      'introspection is authoritative. A token minted before a user narrowed a connection still carries the wider claim'
+    ).toBe(ACTIVE_GRANT.clientId);
+    expect(authInfo.scopes).toEqual([...ACTIVE_GRANT.scopes]);
+  });
+
+  it('binds nothing at all when live introspection was opted out of', async () => {
+    const seen: { authInfo?: AuthInfo; lookup?: AuthorizationLookup } = {};
+    const p = await start({
+      validator: 'accepts',
+      revocation: 'disabled',
+      register: (_server, ctx, authorizationFor) => {
+        if (ctx.authInfo !== undefined) seen.authInfo = ctx.authInfo;
+        seen.lookup = authorizationFor;
+      },
+    });
+
+    await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(
+      seen.authInfo,
+      'no grant was established, so no identity is minted and every tool refuses at dispatch. The transport-only posture stated rather than faked'
+    ).toBeUndefined();
+    expect(seen.lookup?.(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The credential opt-out, which is the third named sentinel. A transport composed on it must make
+ * a credentialed tool **fail**, never proceed with no credential: a public backing
+ * endpoint skips exchange, and "the composition opted out" must not become a fourth way to be
+ * public. The asymmetry is what makes it dangerous — `tools/list` and every public tool keep
+ * working, so a root wired this way reads as healthy.
+ */
+describe('a transport composed on the credential opt-out', () => {
+  it('fails a credentialed tool rather than dispatching it without one', async () => {
+    const key = await createTestKeyPair('mcp-signing-key-1');
+    const upstream = installUpstreamMock([key]);
+    const token = await makeToken({
+      key,
+      iss: MCP_EXPECTED_ISSUER,
+      aud: MCP_RESOURCE_IDENTIFIER,
+      scopes: [...ALL_SCOPES],
+      sub: USER_A,
+      grantId: GRANT_A,
+      clientId: CLIENT_ID,
+    });
+    const server = await startTestServer({
+      credentials: { credentialsDisabled: 'transport-tests-only' },
+      registerRealTools: true,
+      // BOTH probes. With only the credentialed one registered, the control below called a tool
+      // nobody had registered — which answers HTTP 200 carrying a JSON-RPC "method not found" —
+      // so it passed whether or not a public tool worked, and the asymmetry this case exists to
+      // demonstrate was never demonstrated.
+      extraTools: [credentialedProbe, publicProbe],
+    });
+
+    try {
+      const granted = await callTool(server, PUBLIC_TOOL_NAME, {}, token);
+      // Asserted as a RESULT, not as a status. `granted.status` is the transport's answer and is
+      // 200 for an unknown tool, for a tool error, and for a success alike — a status that matches
+      // the hypothesis while an earlier stage produced it.
+      const view = expectToolResult(
+        granted,
+        'control: a PUBLIC tool on this same server still works, which is exactly why an opted-out root reads as healthy'
+      );
+      expect(view.isError, 'and it succeeded rather than returning a tool error').toBe(false);
+      expect(
+        view.structured,
+        'and it really ran the public probe, with no credential — which is what makes the credentialed refusal below an asymmetry rather than a server that refuses everything'
+      ).toEqual({ credentialed: false, grant_id: '' });
+
+      const refused = await callTool(server, CREDENTIALED_TOOL_NAME, {}, token);
+      expect(
+        refused.rpc?.error ?? (refused.rpc?.result as { isError?: boolean } | undefined)?.isError,
+        'the credentialed tool FAILS. Answering it with no credential would make the opt-out a fourth way to be a public endpoint'
+      ).toBeTruthy();
+    } finally {
+      await server.close();
+      await upstream.restore();
+    }
+  });
+});
+
+/**
+ * **THE DISPATCH-TIME SCOPE RE-CHECK, PROVED LOAD-BEARING OVER THE WIRE.**
+ *
+ * The transport selects a scope requirement from the `Mcp-Name` ROUTING HEADER. The registry
+ * selects one from `tool.name` — the descriptor's own name, fixed at registration. Two different
+ * inputs for one decision, and only the second is out of the caller's reach.
+ *
+ * WHAT DOES NOT REACH HERE, MEASURED RATHER THAN ASSUMED: a header naming a different tool than
+ * the body does is refused by the SDK's own protocol rung with HTTP 400 `-32020` before dispatch,
+ * and `test/conformance/routingHeaders.test.ts` pins that in all three forms (mismatched name,
+ * omitted name, mismatched method). So the re-check is NOT the thing standing between a forged
+ * `Mcp-Name` and a tool — do not describe it that way.
+ *
+ * What it IS standing between is a door check that did not run and the dispatcher. The transport's
+ * `missingScopeFor` is an OPTIONAL field, and for the whole of this project's history the
+ * composition root did not pass it; omitting it silently turns the pre-dispatch 403 off. These two
+ * cases are the same request against the same tools and the same grant, differing in exactly that
+ * one field — so the second is about the re-check rather than about a server that refuses
+ * everything. Clients also cache tool lists, which is the same argument a step later.
+ */
+describe('the scope check at the door, and the re-check behind it', () => {
+  /** Held by the caller: signed into the token AND returned by introspection. */
+  const HELD = SCOPES.mealplanRead;
+  /** Required by the tool actually called. Held by nobody in this suite. */
+  const NOT_HELD = SCOPES.nutritionRead;
+
+  interface Fixture {
+    readonly server: Awaited<ReturnType<typeof startTestServer>>;
+    readonly upstream: ReturnType<typeof installUpstreamMock>;
+    readonly token: string;
+  }
+
+  /** `doorChecks` is the only variable between the two cases below. */
+  async function fixture(doorChecks: boolean): Promise<Fixture> {
+    const key = await createTestKeyPair('mcp-signing-key-1');
+    const upstream = installUpstreamMock([key]);
+    const token = await makeToken({
+      key,
+      iss: MCP_EXPECTED_ISSUER,
+      aud: MCP_RESOURCE_IDENTIFIER,
+      scopes: [HELD],
+      sub: USER_A,
+      grantId: GRANT_A,
+      clientId: CLIENT_ID,
+    });
+    // The grant agrees with the token, so a refusal below is about the scope rather than about
+    // the grant failing to bind to the claims.
+    const grant = forgeActiveGrant({
+      grantId: GRANT_A,
+      scopes: [HELD],
+      subject: USER_A,
+      clientId: CLIENT_ID,
+    });
+    const server = await startTestServer({
+      // The real frozen map, not the injected resolver the rest of this file uses: the claim is
+      // about which NAME each half reads, and an injected resolver would be answering about a
+      // fixture's choice instead.
+      ...(doorChecks ? { missingScopeFor: realMissingScopeFor } : {}),
+      revocation: { assertGrantActive: (): Promise<ActiveGrant> => Promise.resolve(grant) },
+      registerRealTools: true,
+    });
+    return { server, upstream, token };
+  }
+
+  it('refuses at the door when the scope step is wired, before the body is parsed', async () => {
+    const { server, upstream, token } = await fixture(true);
+
+    try {
+      const response = await callTool(server, 'nutrition_lookup', { food: 'oats' }, token);
+
+      expect(response.status, 'the pre-dispatch 403, from the transport').toBe(403);
+      expect(
+        response.challenge,
+        'naming the scope, so an assistant can ask for step-up. The quoted PARAMETER, not the bare value: a scope name is a prefix of every scope that extends it, so a bare toContain here is satisfied by a challenge naming nutrition:readwrite when the required scope is nutrition:read'
+      ).toContain(`scope="${NOT_HELD}"`);
+      expect(
+        server.registryDenials,
+        'and the registry was never reached, so it reported nothing'
+      ).toHaveLength(0);
+    } finally {
+      await server.close();
+      await upstream.restore();
+    }
+  });
+
+  it('refuses at the dispatcher when the door check is not wired at all', async () => {
+    const { server, upstream, token } = await fixture(false);
+
+    try {
+      const response = await callTool(server, 'nutrition_lookup', { food: 'oats' }, token);
+
+      expect(
+        response.status,
+        'the door let it through. That is the premise, not a defect: an absent resolver means there is nothing to check, and the transport treats it that way'
+      ).not.toBe(403);
+      expect(
+        server.errors.map((error) => error.message),
+        'and the transport reported no scope denial, which is the same statement read from the other side'
+      ).not.toContainEqual(expect.stringContaining('insufficient_scope'));
+
+      expect(
+        response.rpc?.error ?? (response.rpc?.result as { isError?: boolean } | undefined)?.isError,
+        'and the call is refused anyway, by the one check the composition cannot omit: the registry takes its port as a required field, not an optional one'
+      ).toBeTruthy();
+      expect(
+        JSON.stringify(response.rpc ?? {}),
+        'and refused AS A SCOPE FAILURE. The assertion above is satisfied by any failure at all — a crash, a timeout, a tool that was never registered — so on its own it says only that something went wrong. This names the class the model was told about; the registryDenials assertion below names the class the operator was told about'
+      ).toContain('The granted scopes do not cover this operation.');
+      expect(
+        server.credentialRequests,
+        'refused BEFORE step 4, as the mandatory order requires'
+      ).toHaveLength(0);
+      expect(
+        server.registryDenials,
+        'and the refusal is REPORTED, with the tool it was about and the scopes the grant actually carried'
+      ).toMatchObject([
+        {
+          class: 'insufficient_scope',
+          requiredScope: NOT_HELD,
+          operation: 'nutrition_lookup',
+          heldScopes: [HELD],
+          userId: USER_A,
+          clientId: CLIENT_ID,
+          grantId: GRANT_A,
+        },
+      ]);
+    } finally {
+      await server.close();
+      await upstream.restore();
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { TOOL_SCOPES } from '../auth/scopes.ts';
 import { fetchUpstream } from '../upstream/client.ts';
-import { RetryableUpstreamError } from '../errors.ts';
+import { McpError, RetryableUpstreamError } from '../errors.ts';
 
 const NUTRITION_FIELDS = [
   'category',
@@ -70,24 +71,34 @@ export const contract = {
   outputSchema: OutputSchema,
 } as const;
 
-interface NutritionLookupConfig {
+/**
+ * What the registry hands this tool for one dispatch.
+ *
+ * **There is deliberately no `requestDeadlineMs`.** This handler used to take the whole
+ * configured budget and start it again at dispatch, so one request could run to two full budgets —
+ * and would have run to three the moment a credential exchange joined it. The field is gone rather
+ * than documented, because a comment does not stop the next author copying a working example.
+ */
+interface NutritionLookupRequest {
   readonly nutrihelpApiBaseUrl: string;
-  readonly requestDeadlineMs: number;
+  /** What is LEFT of the one budget, read at the moment of the call. */
+  readonly remainingBudgetMs: () => number;
+  readonly correlationId: string;
 }
 
 // Extracted Helper: Fetches and parses raw upstream data safely
 async function fetchNutritionData(
-  config: NutritionLookupConfig,
+  request: NutritionLookupRequest,
   food: string
 ): Promise<Record<string, unknown>[]> {
   try {
     const response = await fetchUpstream({
-      baseUrl: config.nutrihelpApiBaseUrl,
+      baseUrl: request.nutrihelpApiBaseUrl,
       path: '/api/fooddata/search',
       declaredParameters: ['query'],
       toolArguments: { query: food },
-      deadlineMs: config.requestDeadlineMs,
-      correlationId: undefined,
+      deadlineMs: request.remainingBudgetMs(),
+      correlationId: request.correlationId,
     });
     if (!response.ok) throw new RetryableUpstreamError();
 
@@ -98,7 +109,12 @@ async function fetchNutritionData(
 
     if (!parsed.success) throw new RetryableUpstreamError();
     return parsed.data.data;
-  } catch {
+  } catch (cause: unknown) {
+    // Anything already in the taxonomy keeps ITS cause class. `remainingBudgetMs()` above raises
+    // a spent end-to-end deadline as `request_deadline_exhausted`, and the blanket conversion
+    // below would report that to an operator as a nutrition-lookup 5xx — the wrong component,
+    // the wrong remedy. Only an unclassified failure becomes the generic retryable class.
+    if (cause instanceof McpError) throw cause;
     throw new RetryableUpstreamError();
   }
 }
@@ -146,8 +162,8 @@ function formatOutput(rows: Record<string, unknown>[], targetId?: number) {
 
 // Main tool handler function (Complexity drops from 9 to 2)
 export const handler =
-  (config: NutritionLookupConfig) => async (args: z.infer<typeof inputSchema>) => {
-    const rows = await fetchNutritionData(config, args.food);
+  (request: NutritionLookupRequest) => async (args: z.infer<typeof inputSchema>) => {
+    const rows = await fetchNutritionData(request, args.food);
     const output = formatOutput(rows, args.id);
 
     if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_RESPONSE_BYTES) {
@@ -177,5 +193,21 @@ export const descriptor = {
   name: 'nutrition_lookup',
   contract,
   inputSchema,
+  /**
+   * Step 3's requirement, **taken from the frozen map rather than restated**. Written as the
+   * literal `'nutrition:read'` this would be a second hand-written statement of the tool-to-scope
+   * relation, which is the drift this project has recorded four times; read from the map it is a
+   * projection, and the registry refuses to register the two disagreeing.
+   *
+   * It is also what makes the map entry unavoidable: this expression does not compile until
+   * `TOOL_SCOPES` carries the key, and the registry refuses a shipped tool the map does not name.
+   */
+  scope: TOOL_SCOPES.nutrition_lookup,
+  /**
+   * This endpoint needs no login, so **exchange is skipped and the call carries no
+   * credential**. Declared rather than inferred — the registry reads this to decide whether step 4
+   * runs, and a tool that silently defaulted to "public" would call out unauthenticated.
+   */
+  backing: 'public',
   handler,
 } as const;

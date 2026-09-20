@@ -4,7 +4,7 @@
  * Two kinds of case here and the difference matters. The first describe injects a resolver that
  * answers whatever the case names, so the transport's own behaviour — when it consults the scope
  * step, what it hands it, what it does with the answer — can be asserted without a map deciding it.
- * The last describe wires the **production** scope gate and the real tool-to-scope map, so the 403
+ * The last describe wires the **production** resolver and the real tool-to-scope map, so the 403
  * a deployed server actually answers is on the wire rather than described. Ticket 86.
  */
 
@@ -25,7 +25,7 @@ import {
   type TestServer,
 } from '../support/mcpClient.ts';
 import { forgeActiveGrant } from '../support/activeGrant.ts';
-import { createScopeGate } from '../../src/auth/scopes.ts';
+import { missingScopeFor } from '../../src/auth/scopes.ts';
 import type { ActiveGrant } from '../../src/auth/revocation.ts';
 import { installUpstreamMock, type UpstreamMock } from '../support/upstreamMock.ts';
 import {
@@ -344,7 +344,7 @@ describe('the 401 challenge on the wire', () => {
 });
 
 /**
- * The production wiring, end to end: the real tool-to-scope map, the real scope gate, and the real
+ * The production wiring, end to end: the real tool-to-scope map, the real resolver, and the real
  * transport. Nothing here names a required scope of its own — the map decides, which is what makes
  * these cases able to fail when the map changes.
  *
@@ -360,10 +360,14 @@ describe('the frozen scope map on the wire', () => {
     server = undefined;
   });
 
-  /** A server composed as `src/server.ts` composes it: one gate, both hooks from it. */
+  /**
+   * A server composed as `src/server.ts` composes it: the bare checker, and the frozen map wired
+   * straight in. The grant introspection returns travels to the scope step as the resolver's third
+   * argument — there is no hand-off record between them any more.
+   */
   async function serverGrantingLive(liveScopes: readonly string[]): Promise<TestServer> {
-    const gate = createScopeGate(
-      {
+    return startTestServer({
+      revocation: {
         assertGrantActive: (): Promise<ActiveGrant> =>
           Promise.resolve(
             forgeActiveGrant({
@@ -374,11 +378,7 @@ describe('the frozen scope map on the wire', () => {
             })
           ),
       },
-      { now: () => Date.now(), maxAgeMs: 30_000 }
-    );
-    return startTestServer({
-      revocation: gate.revocation,
-      missingScopeFor: gate.missingScopeFor,
+      missingScopeFor,
       onDispatch: () => {
         dispatches += 1;
       },
@@ -417,8 +417,9 @@ describe('the frozen scope map on the wire', () => {
   /**
    * Asserts only that listing is not refused at the door, because the map gives `tools/list` no
    * requirement. It deliberately does not claim anything about the catalogue's contents: this
-   * fixture registers no tools, and on a deployed server the listing is still **unfiltered** —
-   * `ctx.authInfo` is never set, which is ticket 87's seam. Assert the listed names there.
+   * fixture registers no tools. **Scope-FILTERED listing is still ticket 25's**, and it is a
+   * different claim from this one — `ctx.authInfo` is set now, so the filtering is buildable, but
+   * nothing filters yet. Assert the listed names there, not here.
    */
   it('does not refuse tools/list for want of a scope, whatever the caller holds', async () => {
     server = await serverGrantingLive([]);
