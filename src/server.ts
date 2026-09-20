@@ -93,6 +93,19 @@ const app = createHttpApp({
       // How dispatch reads what this request established. Handed in rather than imported: the
       // WeakMap is scoped to this app instance, so one instance cannot answer another's request.
       authorizationFor,
+      // The security channel, same shape and same sink as the revocation checker's above. A
+      // dispatch denied at the trust boundary is security-relevant, and without this the refusal
+      // is thrown into the SDK where nothing ever calls toLog() — so the identifiers an operator
+      // needs are built and discarded, and the cheapest denials are the only ones reported.
+      logSecurity: (event) => {
+        console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
+      },
+      // And its operational twin, the same pair the revocation checker takes above. A spent
+      // request budget is ordinary backend slowness reported by every outbound call, so filing it
+      // on the security channel would put one record per slow request in front of the denials.
+      logOperational: (event) => {
+        console.error(JSON.stringify({ level: 'warn', channel: 'operational', ...event }));
+      },
       resourceMetadataUrl,
       // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
       // so every dispatch reaching a tool today has no durable audit record behind it. Stated

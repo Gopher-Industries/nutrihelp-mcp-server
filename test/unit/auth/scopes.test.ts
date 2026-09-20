@@ -16,9 +16,11 @@ import type { McpRequestContext, McpServer } from '@modelcontextprotocol/server'
 import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from '../../../src/tools/registry.ts';
 import {
   MEAL_LOG_WRITE_SCOPE,
+  NO_SCOPE,
   SCOPES,
   SCOPE_NAMES,
   TOOL_SCOPES,
+  mappedScopeFor,
   missingScopeFor,
   requiredScopeFor,
   signedScopes,
@@ -117,6 +119,75 @@ describe('the tool-to-scope map', () => {
 
   it('does not name find_recipe, which does not re-enter v1', () => {
     expect(Object.keys(TOOL_SCOPES)).not.toContain('find_recipe');
+  });
+});
+
+/**
+ * The opt-out a descriptor declares, and the reason it is a word rather than `undefined`.
+ *
+ * A registry that read "absent from the map" as "needs no scope" dispatched a registered tool
+ * nobody had scoped, with no scope check at all. The miss and the deliberate opt-out were the same
+ * value, so nothing could tell them apart. These are the assertions that keep them apart.
+ */
+describe('the explicit no-scope declaration', () => {
+  it('is the word none, hand-written here as the pin', () => {
+    expect(NO_SCOPE).toBe('none');
+  });
+
+  it('can never collide with a scope name, because every scope carries a colon', () => {
+    expect(
+      SCOPE_NAMES,
+      'if a scope were ever named none, a descriptor declaring the opt-out would read as requiring it'
+    ).not.toContain(NO_SCOPE);
+    expect(
+      SCOPE_NAMES.every((name) => name.includes(':')),
+      'the property the line above rests on, asserted rather than assumed: resource:action is what makes the two sets disjoint by construction'
+    ).toBe(true);
+    expect(NO_SCOPE).not.toContain(':');
+  });
+
+  it('is not a value the frozen map can produce', () => {
+    expect(
+      Object.values(TOOL_SCOPES),
+      'the map states requirements. The opt-out is a descriptor declaring it has none, which is a different statement and lives in a different place'
+    ).not.toContain(NO_SCOPE);
+  });
+});
+
+/**
+ * The lookup by name, which the registry asks at registration and the routing question below wraps.
+ * One lookup, two readings of a miss — and the whole defect was that only one reading existed.
+ */
+describe('the lookup by tool name', () => {
+  it.each([
+    { name: 'nutrition_lookup', scope: SCOPES.nutritionRead },
+    { name: 'get_meal_plan', scope: SCOPES.mealplanRead },
+    { name: 'record_meal', scope: SCOPES.meallogWrite },
+  ])('answers $scope for $name', ({ name, scope }) => {
+    expect(mappedScopeFor(name)).toBe(scope);
+  });
+
+  it('answers nothing for a name the map does not carry', () => {
+    expect(
+      mappedScopeFor('drop_all_meals'),
+      'silence, which the transport reads as no requirement and the registry reads as refuse to register'
+    ).toBeUndefined();
+  });
+
+  it.each(['constructor', '__proto__', 'toString'])(
+    'answers nothing for the inherited key %s',
+    (name) => {
+      expect(mappedScopeFor(name)).toBeUndefined();
+    }
+  );
+
+  it('is the lookup the routing question uses, rather than a second one beside it', () => {
+    for (const name of [...Object.keys(TOOL_SCOPES), 'drop_all_meals', '__proto__']) {
+      expect(
+        requiredScopeFor(call(name)),
+        `${name}: two lookups over one map is the drift this file exists to prevent`
+      ).toBe(mappedScopeFor(name));
+    }
   });
 });
 
@@ -270,9 +341,13 @@ describe('the two-sided decision', () => {
 });
 
 /**
- * The map is only a control over what the registry actually registers. A tool registered with no
- * entry here reaches its handler with no scope requirement at all, and nothing else in the tree
- * would say so.
+ * The map is only a control over what the registry actually registers.
+ *
+ * **This used to be the ONLY thing holding that property, and it is not any more.** A tool
+ * registered with no entry here reached its handler with no scope requirement at all, and this
+ * scan was the one artifact that said so — a test, which a branch can be green without ever
+ * running. The registry now refuses to register a shipped descriptor the map does not name, at
+ * module load, so the property is structural and this stays as the readable statement of it.
  */
 describe('every registered tool is in the map', () => {
   it('names a scope for each tool the registry registers', () => {
@@ -290,6 +365,9 @@ describe('every registered tool is in the map', () => {
       authorizationFor: () => undefined,
       resourceMetadataUrl: RESOURCE_METADATA_URL,
       auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+      // Likewise: nothing is refused here, so there is nothing to report on either channel.
+      logSecurity: () => undefined,
+      logOperational: () => undefined,
     });
 
     expect(

@@ -8,12 +8,17 @@
  *
  * It is a **test descriptor, not a shipped tool**: it is handed to `registerTools` through
  * `RegistryConfig.extraTools`, it is absent from the frozen tool-to-scope map on purpose (so the
- * scope step gives it no requirement and the case is about the grant rather than about scope), and
- * it makes no outbound call of its own. It reports only **whether** a credential arrived, never
- * its value.
+ * case is about the grant rather than about scope), and it makes no outbound call of its own. It
+ * reports only **whether** a credential arrived, never its value.
+ *
+ * **Absence from that map is no longer what gives it no scope requirement** — it says so itself,
+ * with `NO_SCOPE`. Being unmapped is now a refusal to register for anything shipped, and this is
+ * the case the opt-out exists for: a probe that needs no scope BY DESIGN, saying so, rather than
+ * inheriting the fail-open that a map miss used to hand every registered tool.
  */
 
 import { z } from 'zod';
+import { NO_SCOPE } from '../../src/auth/scopes.ts';
 import type { ToolDescriptor, ToolRequest } from '../../src/tools/registry.ts';
 
 /** Plain per the transport's routing-header grammar, so it can travel in `Mcp-Name`. */
@@ -41,6 +46,8 @@ export const credentialedProbe = {
     outputSchema,
   },
   inputSchema,
+  /** No scope BY DESIGN, declared. An injected descriptor is the only kind allowed to say this. */
+  scope: NO_SCOPE,
   backing: 'credentialed',
   handler: (request: ToolRequest) => () => {
     const output = {

@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { TOOL_SCOPES } from '../auth/scopes.ts';
 import { fetchUpstream } from '../upstream/client.ts';
-import { RetryableUpstreamError } from '../errors.ts';
+import { McpError, RetryableUpstreamError } from '../errors.ts';
 
 const NUTRITION_FIELDS = [
   'category',
@@ -108,7 +109,12 @@ async function fetchNutritionData(
 
     if (!parsed.success) throw new RetryableUpstreamError();
     return parsed.data.data;
-  } catch {
+  } catch (cause: unknown) {
+    // Anything already in the taxonomy keeps ITS cause class. `remainingBudgetMs()` above raises
+    // a spent end-to-end deadline as `request_deadline_exhausted`, and the blanket conversion
+    // below would report that to an operator as a nutrition-lookup 5xx — the wrong component,
+    // the wrong remedy. Only an unclassified failure becomes the generic retryable class.
+    if (cause instanceof McpError) throw cause;
     throw new RetryableUpstreamError();
   }
 }
@@ -187,6 +193,16 @@ export const descriptor = {
   name: 'nutrition_lookup',
   contract,
   inputSchema,
+  /**
+   * Step 3's requirement, **taken from the frozen map rather than restated**. Written as the
+   * literal `'nutrition:read'` this would be a second hand-written statement of the tool-to-scope
+   * relation, which is the drift this project has recorded four times; read from the map it is a
+   * projection, and the registry refuses to register the two disagreeing.
+   *
+   * It is also what makes the map entry unavoidable: this expression does not compile until
+   * `TOOL_SCOPES` carries the key, and the registry refuses a shipped tool the map does not name.
+   */
+  scope: TOOL_SCOPES.nutrition_lookup,
   /**
    * This endpoint needs no login, so **exchange is skipped and the call carries no
    * credential**. Declared rather than inferred — the registry reads this to decide whether step 4

@@ -167,11 +167,25 @@ function mintsCredentials(
  * The provider a request is handed when the composition opted out. It refuses rather than
  * returning nothing, so the opt-out cannot be mistaken for a public backing endpoint: a tool that
  * declares it needs a credential and is handed none must fail, not proceed without one.
+ *
+ * **A taxonomy class, not a raw `Error`.** Failing closed means failing as one of the five classes:
+ * a bare error has no `toModel()`, so the SDK surfaces its message toward the model — and that
+ * message is an internal composition detail. The model side of `upstream_failure` is generic and
+ * retryable; the composition detail stays on the log side.
  */
 const REFUSES_TO_MINT: UpstreamCredentialProvider = {
   credentialFor: () =>
     Promise.reject(
-      new Error('the transport was composed on the credential opt-out, so no exchange can run')
+      new McpError({
+        class: 'upstream_failure',
+        statusClass: 'unavailable',
+        errorCode: 'credential_provider_opted_out',
+        endpointClass: 'token_exchange',
+        // No request is in scope here: this value is a module constant, and a correlation id
+        // invented at construction would join nothing.
+        correlationId: 'unavailable',
+        latencyMs: 0,
+      })
     ),
 };
 

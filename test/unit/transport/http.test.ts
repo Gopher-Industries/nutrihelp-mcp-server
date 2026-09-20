@@ -40,6 +40,7 @@ import {
   PUBLIC_TOOL_NAME,
 } from '../../support/credentialedTool.ts';
 import { callTool, closeLocalDispatcher, startTestServer } from '../../support/mcpClient.ts';
+import { missingScopeFor as realMissingScopeFor } from '../../../src/auth/scopes.ts';
 import { installUpstreamMock } from '../../support/upstreamMock.ts';
 import { expectToolResult } from '../../support/assertions.ts';
 import { createTestKeyPair, makeToken } from '../../../scripts/makeToken.ts';
@@ -1044,10 +1045,13 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
         nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
         authorizationFor,
         resourceMetadataUrl: RESOURCE_METADATA_URL,
-        auditEnqueue: (event: AuditEnqueueEvent): void => {
+        auditEnqueue: (event: AuditEnqueueEvent): Promise<void> => {
           steps.push('audit');
           audit.push(event);
+          return Promise.resolve();
         },
+        logSecurity: () => undefined,
+        logOperational: () => undefined,
         extraTools: [
           {
             ...credentialedProbe,
@@ -1131,10 +1135,11 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
    * left step 5 out of `MANDATORY_ORDER` would assert five steps while claiming six, and that is
    * exactly the shape that reads as satisfied.
    */
-  it('reports that step 5 durably enqueues nothing, because src/audit/logger.ts does not exist', () => {
-    expect(() => {
-      AUDIT_ENQUEUE_NOT_IMPLEMENTED({ tool: 't', correlationId: 'c', grantId: 'g' });
-    }, 'the value the deployed root passes for step 5 accepts the event and stores it nowhere. Per the audit rule a path that skips the durable enqueue is a BYPASS, not a fallback — ticket 34 owns filling it, and this keeps the gap stated rather than assumed').not.toThrow();
+  it('reports that step 5 durably enqueues nothing, because src/audit/logger.ts does not exist', async () => {
+    await expect(
+      AUDIT_ENQUEUE_NOT_IMPLEMENTED({ tool: 't', correlationId: 'c', grantId: 'g' }),
+      'the value the deployed root passes for step 5 accepts the event and stores it nowhere. Per the audit rule a path that skips the durable enqueue is a BYPASS, not a fallback — ticket 34 owns filling it, and this keeps the gap stated rather than assumed'
+    ).resolves.toBeUndefined();
   });
 
   /** The grant introspection returned reaches step 3 as its third argument, not via a hand-off. */
@@ -1314,6 +1319,139 @@ describe('a transport composed on the credential opt-out', () => {
         refused.rpc?.error ?? (refused.rpc?.result as { isError?: boolean } | undefined)?.isError,
         'the credentialed tool FAILS. Answering it with no credential would make the opt-out a fourth way to be a public endpoint'
       ).toBeTruthy();
+    } finally {
+      await server.close();
+      await upstream.restore();
+    }
+  });
+});
+
+/**
+ * **THE DISPATCH-TIME SCOPE RE-CHECK, PROVED LOAD-BEARING OVER THE WIRE.**
+ *
+ * The transport selects a scope requirement from the `Mcp-Name` ROUTING HEADER. The registry
+ * selects one from `tool.name` — the descriptor's own name, fixed at registration. Two different
+ * inputs for one decision, and only the second is out of the caller's reach.
+ *
+ * WHAT DOES NOT REACH HERE, MEASURED RATHER THAN ASSUMED: a header naming a different tool than
+ * the body does is refused by the SDK's own protocol rung with HTTP 400 `-32020` before dispatch,
+ * and `test/conformance/routingHeaders.test.ts` pins that in all three forms (mismatched name,
+ * omitted name, mismatched method). So the re-check is NOT the thing standing between a forged
+ * `Mcp-Name` and a tool — do not describe it that way.
+ *
+ * What it IS standing between is a door check that did not run and the dispatcher. The transport's
+ * `missingScopeFor` is an OPTIONAL field, and for the whole of this project's history the
+ * composition root did not pass it; omitting it silently turns the pre-dispatch 403 off. These two
+ * cases are the same request against the same tools and the same grant, differing in exactly that
+ * one field — so the second is about the re-check rather than about a server that refuses
+ * everything. Clients also cache tool lists, which is the same argument a step later.
+ */
+describe('the scope check at the door, and the re-check behind it', () => {
+  /** Held by the caller: signed into the token AND returned by introspection. */
+  const HELD = SCOPES.mealplanRead;
+  /** Required by the tool actually called. Held by nobody in this suite. */
+  const NOT_HELD = SCOPES.nutritionRead;
+
+  interface Fixture {
+    readonly server: Awaited<ReturnType<typeof startTestServer>>;
+    readonly upstream: ReturnType<typeof installUpstreamMock>;
+    readonly token: string;
+  }
+
+  /** `doorChecks` is the only variable between the two cases below. */
+  async function fixture(doorChecks: boolean): Promise<Fixture> {
+    const key = await createTestKeyPair('mcp-signing-key-1');
+    const upstream = installUpstreamMock([key]);
+    const token = await makeToken({
+      key,
+      iss: MCP_EXPECTED_ISSUER,
+      aud: MCP_RESOURCE_IDENTIFIER,
+      scopes: [HELD],
+      sub: USER_A,
+      grantId: GRANT_A,
+      clientId: CLIENT_ID,
+    });
+    // The grant agrees with the token, so a refusal below is about the scope rather than about
+    // the grant failing to bind to the claims.
+    const grant = forgeActiveGrant({
+      grantId: GRANT_A,
+      scopes: [HELD],
+      subject: USER_A,
+      clientId: CLIENT_ID,
+    });
+    const server = await startTestServer({
+      // The real frozen map, not the injected resolver the rest of this file uses: the claim is
+      // about which NAME each half reads, and an injected resolver would be answering about a
+      // fixture's choice instead.
+      ...(doorChecks ? { missingScopeFor: realMissingScopeFor } : {}),
+      revocation: { assertGrantActive: (): Promise<ActiveGrant> => Promise.resolve(grant) },
+      registerRealTools: true,
+    });
+    return { server, upstream, token };
+  }
+
+  it('refuses at the door when the scope step is wired, before the body is parsed', async () => {
+    const { server, upstream, token } = await fixture(true);
+
+    try {
+      const response = await callTool(server, 'nutrition_lookup', { food: 'oats' }, token);
+
+      expect(response.status, 'the pre-dispatch 403, from the transport').toBe(403);
+      expect(
+        response.challenge,
+        'naming the scope, so an assistant can ask for step-up. The quoted PARAMETER, not the bare value: a scope name is a prefix of every scope that extends it, so a bare toContain here is satisfied by a challenge naming nutrition:readwrite when the required scope is nutrition:read'
+      ).toContain(`scope="${NOT_HELD}"`);
+      expect(
+        server.registryDenials,
+        'and the registry was never reached, so it reported nothing'
+      ).toHaveLength(0);
+    } finally {
+      await server.close();
+      await upstream.restore();
+    }
+  });
+
+  it('refuses at the dispatcher when the door check is not wired at all', async () => {
+    const { server, upstream, token } = await fixture(false);
+
+    try {
+      const response = await callTool(server, 'nutrition_lookup', { food: 'oats' }, token);
+
+      expect(
+        response.status,
+        'the door let it through. That is the premise, not a defect: an absent resolver means there is nothing to check, and the transport treats it that way'
+      ).not.toBe(403);
+      expect(
+        server.errors.map((error) => error.message),
+        'and the transport reported no scope denial, which is the same statement read from the other side'
+      ).not.toContainEqual(expect.stringContaining('insufficient_scope'));
+
+      expect(
+        response.rpc?.error ?? (response.rpc?.result as { isError?: boolean } | undefined)?.isError,
+        'and the call is refused anyway, by the one check the composition cannot omit: the registry takes its port as a required field, not an optional one'
+      ).toBeTruthy();
+      expect(
+        JSON.stringify(response.rpc ?? {}),
+        'and refused AS A SCOPE FAILURE. The assertion above is satisfied by any failure at all — a crash, a timeout, a tool that was never registered — so on its own it says only that something went wrong. This names the class the model was told about; the registryDenials assertion below names the class the operator was told about'
+      ).toContain('The granted scopes do not cover this operation.');
+      expect(
+        server.credentialRequests,
+        'refused BEFORE step 4, as the mandatory order requires'
+      ).toHaveLength(0);
+      expect(
+        server.registryDenials,
+        'and the refusal is REPORTED, with the tool it was about and the scopes the grant actually carried'
+      ).toMatchObject([
+        {
+          class: 'insufficient_scope',
+          requiredScope: NOT_HELD,
+          operation: 'nutrition_lookup',
+          heldScopes: [HELD],
+          userId: USER_A,
+          clientId: CLIENT_ID,
+          grantId: GRANT_A,
+        },
+      ]);
     } finally {
       await server.close();
       await upstream.restore();

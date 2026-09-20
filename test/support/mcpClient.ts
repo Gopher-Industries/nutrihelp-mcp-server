@@ -31,6 +31,7 @@ import {
   type AuditEnqueueEvent,
   type RegistryConfig,
 } from '../../src/tools/registry.ts';
+import type { McpErrorLogPayload } from '../../src/errors.ts';
 import { protectedResourceMetadata } from '../../src/auth/metadata.ts';
 import { createTokenValidator, type KeySetFetch } from '../../src/auth/tokenValidator.ts';
 import {
@@ -96,6 +97,18 @@ export interface TestServer {
    * `src/audit/logger.ts` does not exist.
    */
   readonly auditEnqueued: readonly AuditEnqueueEvent[];
+  /**
+   * Every refusal the registry reported on its security channel, in order. A denial at the trust
+   * boundary is the one record nothing else in the tree produces: the transport reports its own
+   * denials through `onError`, and a refusal thrown into the SDK reports nothing at all.
+   */
+  readonly registryDenials: readonly McpErrorLogPayload[];
+  /**
+   * And everything it reported on its OPERATIONAL channel. Collected separately rather than into
+   * the list above: the two channels are only separated if something can tell them apart, and a
+   * single collector would be satisfied by a registry that files a timeout as a denial.
+   */
+  readonly registryOperational: readonly McpErrorLogPayload[];
   close(): Promise<void>;
 }
 
@@ -120,7 +133,7 @@ export type RevocationFixture = RevocationChecker | RevocationDisabled | 'live';
 export type CredentialsFixture = UpstreamCredentialProvider | CredentialsDisabled | 'live';
 
 export interface TestServerOptions {
-  /** Only way to reach the 403 branch until a tool-to-scope map exists. */
+  /** How a case chooses the door check. The composition root supplies the real frozen one. */
   readonly missingScopeFor?: MissingScopeResolver;
   /** Fires once a request reaches the MCP handler — otherwise dispatch is invisible with no tools registered. */
   readonly onDispatch?: () => void;
@@ -303,6 +316,8 @@ export async function startTestServer(
   const revocationEvents: (OperationalEvent | SecurityEvent)[] = [];
   const credentialRequests: UpstreamCredentialRequest[] = [];
   const auditEnqueued: AuditEnqueueEvent[] = [];
+  const registryDenials: McpErrorLogPayload[] = [];
+  const registryOperational: McpErrorLogPayload[] = [];
   const app = createHttpApp({
     factory: (ctx, authorizationFor) => {
       options.onDispatch?.();
@@ -312,7 +327,16 @@ export async function startTestServer(
           nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
           authorizationFor,
           resourceMetadataUrl: RESOURCE_METADATA_URL,
-          auditEnqueue: (event: AuditEnqueueEvent) => auditEnqueued.push(event),
+          auditEnqueue: (event: AuditEnqueueEvent): Promise<void> => {
+            auditEnqueued.push(event);
+            return Promise.resolve();
+          },
+          logSecurity: (event: McpErrorLogPayload): void => {
+            registryDenials.push(event);
+          },
+          logOperational: (event: McpErrorLogPayload): void => {
+            registryOperational.push(event);
+          },
           ...(options.extraTools === undefined ? {} : { extraTools: options.extraTools }),
         });
       }
@@ -368,6 +392,8 @@ export async function startTestServer(
     revocationEvents,
     credentialRequests,
     auditEnqueued,
+    registryDenials,
+    registryOperational,
     async close(): Promise<void> {
       server.closeAllConnections();
       await new Promise<void>((resolve) => {

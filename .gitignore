@@ -16,4 +16,5 @@ docs/
 CLAUDE.md
 TMP_*
 .superpowers/
-.env.backup-2026-09-20
+# A pattern, not one dated name: the next backup would otherwise be untracked.
+.env.backup*

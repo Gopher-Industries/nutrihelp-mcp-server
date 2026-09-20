@@ -42,6 +42,24 @@ export const TOOL_SCOPES = Object.freeze({
 export type ScopedToolName = keyof typeof TOOL_SCOPES;
 
 /**
+ * The explicit opt-out, and the reason it is a word rather than `undefined`.
+ *
+ * A registered tool absent from the map above used to mean "no scope requirement", because that is
+ * what a map miss answers. At the transport that reading is right — the name arrives in a request
+ * header and may be a typo. At the registry it is the wrong default: the name comes off a
+ * descriptor that IS registered and IS dispatchable, so a miss means nobody assigned the tool a
+ * scope, and the safe answer is refuse. A descriptor therefore carries a `ScopeDecision` and
+ * `NO_SCOPE` is how one SAYS it needs none, which an omission cannot say.
+ *
+ * It can never collide with a scope name: every scope above is `resource:action` and carries a
+ * colon. Pinned in `test/unit/auth/scopes.test.ts` rather than left to the reader.
+ */
+export const NO_SCOPE = 'none';
+
+/** What a tool descriptor declares: a scope from the frozen map, or the opt-out above. */
+export type ScopeDecision = ScopeName | typeof NO_SCOPE;
+
+/**
  * A `Map`, not the object: a capability name arrives in a request header, and object lookup answers
  * inherited keys — `constructor` would resolve to a function, `__proto__` to the prototype.
  */
@@ -65,16 +83,36 @@ export interface ScopeRouting {
 }
 
 /**
+ * What the one hand-written relation says about this tool NAME, or `undefined` when it names no
+ * scope for it. The registry asks this at registration to check a descriptor's declaration against
+ * the map; the routing question below is a wrapper on it, so there is one lookup and not two.
+ *
+ * **A miss is not an answer to "does this tool need a scope".** It says only that the map is
+ * silent, and the two callers are entitled to read that silence differently — which is the whole
+ * distinction this pair exists to keep.
+ */
+export function mappedScopeFor(name: string): ScopeName | undefined {
+  return TOOL_SCOPE_BY_NAME.get(name);
+}
+
+/**
  * What this routing pair requires, or `undefined` when nothing does.
  *
  * **An unknown method and an unknown tool name both yield NO requirement, not a default.** This
- * step answers "which scope does this need", not "does this exist": `tools/list` is filtered at the
- * registry rather than refused, and an unregistered name is the dispatcher's 404 — answering 403
- * would name a scope that grants nothing.
+ * step answers "which scope does this need", not "does this exist": `tools/list` carries no
+ * per-capability requirement here, filtering the listing is the registry's job and is not built yet
+ * (ticket 25), and an unregistered name is the dispatcher's 404 — answering 403 would name a scope
+ * that grants nothing.
+ *
+ * **That default is honest HERE and was a fail-open at the registry, which is why the registry no
+ * longer calls this.** The name this function is handed arrives in the `Mcp-Name` routing header
+ * and the caller chooses it; the name the registry was handing it came off a descriptor that is
+ * registered and dispatchable. Same lookup, opposite meaning for a miss. The registry reads the
+ * descriptor's `ScopeDecision` instead and refuses to register one that has not made a decision.
  */
 export function requiredScopeFor(routing: ScopeRouting): ScopeName | undefined {
   if (routing.method !== TOOL_CALL_METHOD || routing.name === undefined) return undefined;
-  return TOOL_SCOPE_BY_NAME.get(routing.name);
+  return mappedScopeFor(routing.name);
 }
 
 /**

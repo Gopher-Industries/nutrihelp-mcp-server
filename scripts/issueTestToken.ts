@@ -2,6 +2,10 @@
  * Local issuer: one RS256 pair for the printed token and the JWKS it serves, so a reject is
  * never "wrong key vs wrong signature". Not a second composition root — fixture plus HTTPS file
  * server. Writes `.dev/` (git-ignored).
+ *
+ * `devUpstreams.ts` serves the same key set beside the endpoints this file does not have, and
+ * takes the key handling, the directory and the token profile from here rather than repeating
+ * them. Importing this module issues nothing: everything below `isEntrypoint` is guarded.
  */
 
 import 'dotenv/config';
@@ -11,14 +15,15 @@ import { createPublicKey, KeyObject } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { exportJWK, importJWK, type JWK } from 'jose';
+import { SCOPE_NAMES } from '../src/auth/scopes.ts';
 import { createTestKeyPair, makeToken, MCP_TOKEN_ALG, type TestKeyPair } from './makeToken.ts';
 
 /** Git-ignored: signing key, TLS key, Inspector config. */
-const DEV_DIR = fileURLToPath(new URL('../.dev/', import.meta.url));
+export const DEV_DIR = fileURLToPath(new URL('../.dev/', import.meta.url));
 
 const SIGNING_KEY_FILE = `${DEV_DIR}signing-key.json`;
-const TLS_KEY_FILE = `${DEV_DIR}tls-key.pem`;
-const TLS_CERT_FILE = `${DEV_DIR}tls-cert.pem`;
+export const TLS_KEY_FILE = `${DEV_DIR}tls-key.pem`;
+export const TLS_CERT_FILE = `${DEV_DIR}tls-cert.pem`;
 const INSPECTOR_CONFIG_FILE = `${DEV_DIR}inspector.json`;
 
 /** Inspector config entry name. Web UI ignores `--server`; CLI/TUI need this. */
@@ -28,13 +33,17 @@ const INSPECTOR_SERVER_NAME = 'nutrihelp';
 const DEV_KEY_ID = 'dev-issuer-key';
 
 /** Session-length, not a grant. */
-const DEV_TOKEN_LIFETIME = '1h';
+export const DEV_TOKEN_LIFETIME = '1h';
 
-/** Empty until frozen scopes land; a made-up name would read as a contract. */
-const DEV_TOKEN_SCOPES: readonly string[] = [];
+/**
+ * Every scope the frozen map defines, taken from that map rather than written out again.
+ * A token naming none is refused at the scope step before it reaches a tool, so an empty list
+ * made the printed token unusable the moment that step was wired.
+ */
+export const DEV_TOKEN_SCOPES: readonly string[] = SCOPE_NAMES;
 
 /** Dev subject. Not a real account. */
-const DEV_TOKEN_SUBJECT = 'local-dev-user';
+export const DEV_TOKEN_SUBJECT = 'local-dev-user';
 
 /** On-disk key: private half only. Older files may still have `publicJwk`; it is ignored. */
 interface StoredSigningKey {
@@ -46,7 +55,7 @@ interface StoredSigningKey {
 /** Private-only JWK members. Serving any of these publishes the signing key. */
 const PRIVATE_JWK_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k'] as const;
 
-function readEnv(name: string): string {
+export function readEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') {
     throw new Error(
@@ -57,7 +66,7 @@ function readEnv(name: string): string {
   return value.trim();
 }
 
-function readFileOrExplain(path: string, what: string): Buffer {
+export function readFileOrExplain(path: string, what: string): Buffer {
   try {
     return readFileSync(path);
   } catch {
@@ -141,7 +150,7 @@ export async function derivePublicJwk(
  * When a key must be generated, returns the write rather than performing it, so the caller can
  * defer persist until after a successful bind. An existing key loads without writing.
  */
-async function loadOrCreateKeyPair(): Promise<{
+export async function loadOrCreateKeyPair(): Promise<{
   readonly key: TestKeyPair;
   readonly persist: (() => void) | undefined;
 }> {
@@ -175,7 +184,7 @@ async function loadOrCreateKeyPair(): Promise<{
 }
 
 /** Refuse query/fragment: the server pins scheme only, and a 404 here looks like a cert-trust failure. */
-function jwksKeySetUrl(): URL {
+export function jwksKeySetUrl(): URL {
   const raw = readEnv('MCP_JWKS_URL');
   if (raw.includes('?') || raw.includes('#')) {
     throw new Error('MCP_JWKS_URL must carry no query string and no fragment.');
@@ -183,18 +192,21 @@ function jwksKeySetUrl(): URL {
   return new URL(raw);
 }
 
-/** Resolve after listen. EADDRINUSE means an issuer is already running — do not overwrite the token. */
-function bind(server: Server, hostname: string, port: number): Promise<void> {
+/**
+ * Resolve after listen. EADDRINUSE means something is already serving there — do not overwrite
+ * the token. `inUseMessage` is the caller's, because only the caller knows which service it was
+ * standing up and therefore what a reader should stop.
+ */
+export function bind(
+  server: Server,
+  hostname: string,
+  port: number,
+  inUseMessage: string
+): Promise<void> {
   return new Promise((resolve, reject) => {
     function onFailedBind(cause: Error): void {
       reject(
-        (cause as NodeJS.ErrnoException).code === 'EADDRINUSE'
-          ? new Error(
-              `${hostname}:${String(port)} is already in use, so this issuer did not start and ` +
-                'nothing was changed. An issuer is almost certainly already running there — stop ' +
-                'it first, and it will print a fresh token when it restarts.'
-            )
-          : cause
+        (cause as NodeJS.ErrnoException).code === 'EADDRINUSE' ? new Error(inUseMessage) : cause
       );
     }
     server.once('error', onFailedBind);
@@ -202,7 +214,7 @@ function bind(server: Server, hostname: string, port: number): Promise<void> {
       // After bind, `error` is a runtime fault — do not reject an already-resolved promise.
       server.off('error', onFailedBind);
       server.on('error', (cause: Error) => {
-        console.error(`key set server error: ${cause.message}`);
+        console.error(`${hostname}:${String(port)} server error: ${cause.message}`);
       });
       resolve();
     });
@@ -210,7 +222,7 @@ function bind(server: Server, hostname: string, port: number): Promise<void> {
 }
 
 /** Explicit port: this process will not bind 443. */
-function jwksAddress(jwksUrl: URL): { readonly hostname: string; readonly port: number } {
+export function jwksAddress(jwksUrl: URL): { readonly hostname: string; readonly port: number } {
   if (jwksUrl.port === '') {
     throw new Error(
       `MCP_JWKS_URL must name an explicit port, for example https://127.0.0.1:8443/jwks — this ` +
@@ -220,7 +232,7 @@ function jwksAddress(jwksUrl: URL): { readonly hostname: string; readonly port: 
   return { hostname: jwksUrl.hostname, port: Number.parseInt(jwksUrl.port, 10) };
 }
 
-function writeInspectorConfig(mcpUrl: string, token: string): void {
+export function writeInspectorConfig(mcpUrl: string, token: string): void {
   const config = {
     mcpServers: {
       [INSPECTOR_SERVER_NAME]: {
@@ -267,7 +279,14 @@ async function main(): Promise<void> {
 
   // Bind first: a failed refresh must not write inspector.json or a newly generated signing key.
   const { hostname, port: jwksPort } = jwksAddress(jwksUrl);
-  await bind(server, hostname, jwksPort);
+  await bind(
+    server,
+    hostname,
+    jwksPort,
+    `${hostname}:${String(jwksPort)} is already in use, so this issuer did not start and ` +
+      'nothing was changed. An issuer is almost certainly already running there — stop ' +
+      'it first, and it will print a fresh token when it restarts.'
+  );
   persist?.();
 
   const token = await makeToken({
@@ -293,18 +312,21 @@ async function main(): Promise<void> {
 }
 
 /**
- * True only when this file is the process entry. Unguarded import would bind the port and rewrite
- * `.dev/`. `import.meta.main` is 24.2+ (experimental); on 24.0/24.1 it is undefined and
+ * True only when `moduleUrl` is the process entry. Unguarded import would bind the port and
+ * rewrite `.dev/`. `import.meta.main` is 24.2+ (experimental); on 24.0/24.1 it is undefined and
  * `token:test` would exit 0 without issuing. Path compare holds for the whole engines range.
  * No `argv[1]` (`node -e`) is not this file — do not issue.
+ *
+ * Takes the caller's `import.meta.url` rather than reading its own, so the sibling script that
+ * imports this module asks the same question about itself.
  */
-function isEntrypoint(): boolean {
+export function isEntrypoint(moduleUrl: string): boolean {
   const invoked = process.argv[1];
-  return invoked !== undefined && pathToFileURL(invoked).href === import.meta.url;
+  return invoked !== undefined && pathToFileURL(invoked).href === moduleUrl;
 }
 
 /** Print the error sentence, not a stack: EADDRINUSE is the documented refresh path. */
-if (isEntrypoint()) {
+if (isEntrypoint(import.meta.url)) {
   await main().catch((cause: unknown) => {
     console.error(cause instanceof Error ? cause.message : String(cause));
     process.exit(1);

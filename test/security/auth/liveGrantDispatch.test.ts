@@ -177,10 +177,11 @@ describe('a disconnected grant, against a deliberately warm credential cache', (
     const listAfter = await listTools(server, tokenA);
 
     expect(listAfter.status, 'an authenticated inactive answer is the only 401').toBe(401);
-    expect(
-      server.credentialRequests.length,
-      'refused BEFORE any cached credential is read. The credential for this grant is sitting warm in the cache and was never consulted'
-    ).toBe(beforeDisconnect);
+    // NOT load-bearing, and said so rather than dressed up: no listing path can reach step 4 in
+    // ANY implementation, so this count is unchanged for a reason unrelated to the disconnect.
+    // The falsifiable half of the listing claim is the 401 above. The equivalent assertion after
+    // the tool CALL below is a different matter — that one a reordered implementation can fail.
+    expect(server.credentialRequests.length).toBe(beforeDisconnect);
 
     // 4. And the very next tool CALL.
     introspectOnce(DISCONNECTED);
