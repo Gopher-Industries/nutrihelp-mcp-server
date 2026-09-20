@@ -15,9 +15,22 @@ import {
 } from '@modelcontextprotocol/server';
 import {
   createHttpApp,
+  type AuthorizationLookup,
+  type CredentialsDisabled,
   type MissingScopeResolver,
   type RevocationDisabled,
 } from '../../src/transport/http.ts';
+import {
+  createUpstreamCredentialProvider,
+  type UpstreamCredential,
+  type UpstreamCredentialProvider,
+  type UpstreamCredentialRequest,
+} from '../../src/auth/upstreamToken.ts';
+import {
+  registerTools,
+  type AuditEnqueueEvent,
+  type RegistryConfig,
+} from '../../src/tools/registry.ts';
 import { protectedResourceMetadata } from '../../src/auth/metadata.ts';
 import { createTokenValidator, type KeySetFetch } from '../../src/auth/tokenValidator.ts';
 import {
@@ -42,7 +55,9 @@ import {
   MCP_AUTH_SERVER_URL,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
+  NUTRIHELP_API_BASE_URL,
   RESOURCE_METADATA_URL,
+  TOKEN_EXCHANGE_PATH,
   USER_A,
 } from './testEnv.ts';
 
@@ -69,6 +84,18 @@ export interface TestServer {
   readonly introspections: readonly IntrospectionRequest[];
   /** What a `'live'` checker reported on its two channels. Empty for the default fake. */
   readonly revocationEvents: readonly (OperationalEvent | SecurityEvent)[];
+  /**
+   * Every step-4 credential request, in order, whatever provider is wired. **A suite proving a
+   * credential is never reached asserts on this**, not on the wire: a warm cache answers without
+   * a wire call, so an empty wire proves nothing about whether the cache was consulted.
+   */
+  readonly credentialRequests: readonly UpstreamCredentialRequest[];
+  /**
+   * What step 5 was asked to enqueue. **The deployed root supplies a placeholder that enqueues
+   * nothing**, so this records the CALL rather than a delivery — which is the honest shape while
+   * `src/audit/logger.ts` does not exist.
+   */
+  readonly auditEnqueued: readonly AuditEnqueueEvent[];
   close(): Promise<void>;
 }
 
@@ -81,6 +108,17 @@ export interface TestServer {
  */
 export type RevocationFixture = RevocationChecker | RevocationDisabled | 'live';
 
+/**
+ * How the fixture supplies the required `credentials` field.
+ *
+ * - omitted — an in-process minter answering a canned credential, so ordering is exercised
+ *   without a wire round trip.
+ * - `'live'` — the production provider at the mocked token endpoint, which is the only way to
+ *   observe the cache: a warm hit is a call to `credentialFor` with **no** exchange on the wire.
+ * - a provider or the named opt-out — supplied verbatim.
+ */
+export type CredentialsFixture = UpstreamCredentialProvider | CredentialsDisabled | 'live';
+
 export interface TestServerOptions {
   /** Only way to reach the 403 branch until a tool-to-scope map exists. */
   readonly missingScopeFor?: MissingScopeResolver;
@@ -92,6 +130,16 @@ export interface TestServerOptions {
   readonly keySetFetch?: KeySetFetch;
   /** See `RevocationFixture`. Defaults to an in-process checker that answers "active". */
   readonly revocation?: RevocationFixture;
+  /** See `CredentialsFixture`. Defaults to an in-process minter. */
+  readonly credentials?: CredentialsFixture;
+  /**
+   * Register through the **production** `registerTools`, so the dispatch wrapper — the identity
+   * lookup, the scope re-check, step 4 and the audit hole — is the one under test rather than a
+   * fixture standing in for it.
+   */
+  readonly registerRealTools?: boolean;
+  /** Extra descriptors handed to the production registry. Needs `registerRealTools`. */
+  readonly extraTools?: RegistryConfig['extraTools'];
 }
 
 /** The fixture's key-set lifetime. Long enough that no case refetches unless it means to. */
@@ -177,27 +225,98 @@ const ALWAYS_ACTIVE: RevocationChecker = {
   assertGrantActive: (): Promise<ActiveGrant> => Promise.resolve(FIXTURE_ACTIVE_GRANT),
 };
 
+/** Where a `'live'` provider exchanges. Same origin as introspection, and mocked. */
+export const TOKEN_EXCHANGE_URL = `${AUTH_SERVER_ORIGIN}${TOKEN_EXCHANGE_PATH}`;
+
+/** What the default in-process minter answers with. Distinctive so a leak is greppable. */
+export const FIXTURE_EXCHANGED_CREDENTIAL = 'fixture-exchanged-upstream-credential';
+
+/** The default: mints without a wire round trip, so ordering cases need no exchange route. */
+const ALWAYS_MINTS: UpstreamCredentialProvider = {
+  credentialFor: (request: UpstreamCredentialRequest): Promise<UpstreamCredential> =>
+    Promise.resolve({
+      accessToken: FIXTURE_EXCHANGED_CREDENTIAL,
+      grantId: request.grant.grantId,
+      usableUntilMs: Date.now() + 60_000,
+    }),
+};
+
+function mintsCredentials(
+  fixture: UpstreamCredentialProvider | CredentialsDisabled
+): fixture is UpstreamCredentialProvider {
+  return 'credentialFor' in fixture;
+}
+
+/**
+ * Resolve the fixture into the transport field, recording every request so a case can assert step
+ * 4 ran — or did not — whichever provider answered.
+ */
+function resolveCredentials(
+  fixture: CredentialsFixture,
+  requests: UpstreamCredentialRequest[]
+): UpstreamCredentialProvider | CredentialsDisabled {
+  let provider: UpstreamCredentialProvider;
+  if (fixture === 'live') {
+    provider = createUpstreamCredentialProvider({
+      tokenEndpointUrl: TOKEN_EXCHANGE_URL,
+      clientId: MCP_CLIENT_ID,
+      clientAssertionKey: FIXTURE_CLIENT_ASSERTION_KEY,
+      now: () => Date.now(),
+      logOperational: () => undefined,
+      logSecurity: () => undefined,
+    });
+  } else if (mintsCredentials(fixture)) {
+    provider = fixture;
+  } else {
+    return fixture;
+  }
+
+  return {
+    credentialFor: (request: UpstreamCredentialRequest): Promise<UpstreamCredential> => {
+      requests.push(request);
+      return provider.credentialFor(request);
+    },
+  };
+}
+
 /**
  * Start the transport as `src/server.ts` composes it — including authorization. Omitting that
  * wiring makes every rejection case pass or fail for the wrong reason.
  *
- * Live introspection is wired for **every** case (default always-active), matching the required
- * field in production — defaulting to the opt-out would reintroduce that omission in tests.
- * Registry still absent; order stops at the scope check.
+ * Live introspection and the credential minter are wired for **every** case (defaults: always
+ * active, always mints), matching the two required fields in production — defaulting either to its
+ * opt-out would reintroduce in tests exactly the omission those fields exist to prevent.
+ *
+ * **Tools are NOT registered by default.** Pass `registerRealTools` to drive the production
+ * `registerTools`, which is what puts steps 4, 5 and 6 under test; without it the order stops at
+ * the scope check and a `tools/call` reaches a dispatcher with nothing registered.
  */
 export async function startTestServer(
-  optionsOrConfigure: TestServerOptions | ((server: McpServer) => void) = {}
+  optionsOrConfigure:
+    | TestServerOptions
+    | ((server: McpServer, authorizationFor: AuthorizationLookup) => void) = {}
 ): Promise<TestServer> {
   const options = typeof optionsOrConfigure === 'function' ? {} : optionsOrConfigure;
   const configureServer = typeof optionsOrConfigure === 'function' ? optionsOrConfigure : undefined;
   const errors: Error[] = [];
   const introspections: IntrospectionRequest[] = [];
   const revocationEvents: (OperationalEvent | SecurityEvent)[] = [];
+  const credentialRequests: UpstreamCredentialRequest[] = [];
+  const auditEnqueued: AuditEnqueueEvent[] = [];
   const app = createHttpApp({
-    factory: () => {
+    factory: (ctx, authorizationFor) => {
       options.onDispatch?.();
       const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
-      configureServer?.(server);
+      if (options.registerRealTools === true) {
+        registerTools(server, ctx, {
+          nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
+          authorizationFor,
+          resourceMetadataUrl: RESOURCE_METADATA_URL,
+          auditEnqueue: (event: AuditEnqueueEvent) => auditEnqueued.push(event),
+          ...(options.extraTools === undefined ? {} : { extraTools: options.extraTools }),
+        });
+      }
+      configureServer?.(server, authorizationFor);
       return server;
     },
     allowedOriginHostnames: [...ALLOWED_ORIGIN_HOSTNAMES],
@@ -222,6 +341,7 @@ export async function startTestServer(
         introspections,
         revocationEvents
       ),
+      credentials: resolveCredentials(options.credentials ?? ALWAYS_MINTS, credentialRequests),
       // One budget, shared with the validator above (as the composition root shares it).
       requestDeadlineMs: options.requestDeadlineMs ?? FIXTURE_REQUEST_DEADLINE_MS,
       ...(options.missingScopeFor === undefined
@@ -246,6 +366,8 @@ export async function startTestServer(
     errors,
     introspections,
     revocationEvents,
+    credentialRequests,
+    auditEnqueued,
     async close(): Promise<void> {
       server.closeAllConnections();
       await new Promise<void>((resolve) => {

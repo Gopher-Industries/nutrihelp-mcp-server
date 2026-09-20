@@ -11,7 +11,7 @@
  */
 
 import type { JWTPayload } from 'jose';
-import type { ActiveGrant, IntrospectionRequest, RevocationChecker } from './revocation.ts';
+import type { ActiveGrant } from './revocation.ts';
 
 /** **The one hand-written statement of the scope set.** Everything else derives from it. */
 export const SCOPES = Object.freeze({
@@ -53,10 +53,11 @@ const TOOL_SCOPE_BY_NAME: ReadonlyMap<string, ScopeName> = new Map<string, Scope
 const TOOL_CALL_METHOD = 'tools/call';
 
 /**
- * The routing pair, structurally. A second declaration of the transport's `RequestRouting`:
- * importing it would **not** be a cycle, so this is deliberate until ticket 87, which owns the
- * transport. ⚠️ The hazard is that it goes **silent** — a field added to `RequestRouting` leaves it
- * assignable to this, so nothing fails and the scope step simply cannot see the new field.
+ * The routing pair, structurally. A second declaration of the transport's `RequestRouting`, and it
+ * **stays** one: `src/auth/**` must not import the transport, and the assignability that makes this
+ * work is checked where the composition root hands `missingScopeFor` to `createHttpApp`. The
+ * hazard is that it goes **silent** — a field added to `RequestRouting` leaves it assignable to
+ * this, so nothing fails and the scope step simply cannot see the new field.
  */
 export interface ScopeRouting {
   readonly method: string | undefined;
@@ -128,88 +129,4 @@ export function missingScopeFor(
   if (!bindsToClaims(claims, grant)) return required;
   if (!grant.scopes.includes(required)) return required;
   return undefined;
-}
-
-/**
- * The transport's two hooks, wired to each other.
- *
- * ⚠️ **`revocation` must be the checker handed to `createHttpApp`** — the transport discards what
- * `assertGrantActive` returns, so the grant reaches the scope step by being recorded on its way past.
- * **Ticket 87 carries the `ActiveGrant` into dispatch**, passes it as `missingScopeFor`'s third
- * argument, and deletes this hand-off.
- */
-export interface ScopeGate {
-  readonly revocation: RevocationChecker;
-  readonly missingScopeFor: (routing: ScopeRouting, claims: JWTPayload) => ScopeName | undefined;
-}
-
-export interface ScopeGateOptions {
-  /** Injected so expiry is testable without waiting. */
-  readonly now: () => number;
-  /**
-   * How long a recorded grant may wait to be taken, in ms. **Pass the one request budget**, and no
-   * default: this is the only thing bounding the hand-off.
-   */
-  readonly maxAgeMs: number;
-}
-
-/** A grant recorded on its way past, and when. Time-ordered, because `now` only moves forward. */
-interface EstablishedGrant {
-  readonly grant: ActiveGrant;
-  readonly at: number;
-}
-
-/**
- * Wrap a revocation checker so the scope step can read the grant that checker just established.
- * Every entry came from an `active: true` answer moments earlier and is taken at most once; a
- * request with no matching entry is refused.
- *
- * ⛔ **It is NOT keyed to the request that wrote it, only to the connection identity, and the
- * failure direction is OPEN.** Two requests overlapping on one connection can take each other's
- * answer: if the grant narrows between their introspections, the later request takes the earlier,
- * wider answer and is permitted a scope the user has just revoked. The fix is a per-request key,
- * which is ticket 87 — not a second binding here.
- *
- * **Bounded by age, not by count.** An entry can be written and never taken (a token whose identity
- * claims disagree with the introspected grant), and a caller can repeat that on ONE connection, so a
- * ceiling counting connections never fires. An entry older than one request budget is one no request
- * is still waiting for, so evicting it costs nothing — where a count ceiling would evict a record an
- * in-flight request was about to want and answer 403 to a scope the user has granted.
- */
-export function createScopeGate(checker: RevocationChecker, options: ScopeGateOptions): ScopeGate {
-  /** Oldest first, because `record` appends and `now` does not go backwards. */
-  const established: EstablishedGrant[] = [];
-
-  function record(grant: ActiveGrant): void {
-    const at = options.now();
-    established.push({ grant, at });
-
-    const oldestKept = at - options.maxAgeMs;
-    let expired = 0;
-    for (const entry of established) {
-      if (entry.at >= oldestKept) break;
-      expired += 1;
-    }
-    // `splice(0, 0)` is a no-op, so no guard: a guard here is a branch that adds nothing.
-    established.splice(0, expired);
-  }
-
-  function take(claims: JWTPayload): ActiveGrant | undefined {
-    const entry = established.find((candidate) => bindsToClaims(claims, candidate.grant));
-    if (entry === undefined) return undefined;
-    established.splice(established.indexOf(entry), 1);
-    return entry.grant;
-  }
-
-  return {
-    revocation: {
-      assertGrantActive: async (request: IntrospectionRequest): Promise<ActiveGrant> => {
-        const grant = await checker.assertGrantActive(request);
-        record(grant);
-        return grant;
-      },
-    },
-    missingScopeFor: (routing: ScopeRouting, claims: JWTPayload): ScopeName | undefined =>
-      missingScopeFor(routing, claims, take(claims)),
-  };
 }

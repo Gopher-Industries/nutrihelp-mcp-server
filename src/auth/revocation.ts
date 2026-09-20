@@ -52,7 +52,7 @@ declare const activeGrantBrand: unique symbol;
  * says a check RAN, not *which token* it ran for: the grant for token B paired with subject token
  * A typechecked, as did one grant held for the whole process. Consumers refuse a mismatch.
  *
- * ⚠️ Still **no freshness claim** — there is no timestamp. What bounds that today is that a grant
+ * Still **no freshness claim** — there is no timestamp. What bounds that today is that a grant
  * is minted per request and discarded with it.
  */
 export interface ActiveGrant {

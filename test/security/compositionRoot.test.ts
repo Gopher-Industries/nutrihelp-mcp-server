@@ -93,7 +93,21 @@ describe('the composition root', () => {
     ).not.toMatch(/\brevocationDisabled\s*:/);
   });
 
-  it('finds both sentinels in the module that declares them', () => {
+  /**
+   * The third sentinel. A root on this one would compose a transport that cannot mint the
+   * exchanged credential, so every credentialed tool fails — but `tools/list` and every public
+   * backing endpoint keep working, which is exactly the shape that reads as healthy.
+   */
+  it('never builds the transport on the credential opt-out', () => {
+    const source = sourceOf('src/server.ts');
+
+    expect(
+      source,
+      'the property assignment, not the bare word: the file names credentials in prose'
+    ).not.toMatch(/\bcredentialsDisabled\s*:/);
+  });
+
+  it('finds all three sentinels in the module that declares them', () => {
     const transport = sourceOf('src/transport/http.ts');
 
     expect(
@@ -108,6 +122,10 @@ describe('the composition root', () => {
       transport,
       'control: and the introspection opt-out likewise. Renaming either field would otherwise leave this file green while asserting the absence of something nothing declares'
     ).toMatch(/\brevocationDisabled\s*:/);
+    expect(
+      transport,
+      'control: and the credential opt-out, added with the third required field. Each absence assertion above is only worth what its declaration control is worth'
+    ).toMatch(/\bcredentialsDisabled\s*:/);
     expect(
       transport.length,
       'control: and the file really was read rather than resolving to an empty string'
@@ -250,16 +268,43 @@ describe('the composition root', () => {
 
     expect(
       source,
-      'the root builds the gate from the frozen map. Anchored on the call rather than a variable name'
-    ).toContain('createScopeGate(');
+      'the frozen map itself, imported rather than reimplemented here. The hand-off shim that used to sit between it and the transport is gone: the grant now travels as the resolver third argument'
+    ).toMatch(/import \{ missingScopeFor \} from '\.\/auth\/scopes\.ts';/);
     expect(
       options,
       'and hands the transport the resolver. Absent, the field is simply omitted and every scoped tool call dispatches with no scope check at all'
-    ).toMatch(/missingScopeFor:\s*[A-Za-z_$]/);
+    ).toMatch(/missingScopeFor,/);
+    expect(
+      source,
+      'and it must NOT reintroduce the connection-keyed hand-off: that shim was keyed to the connection rather than the request, so two requests overlapping on one connection could take each other answer — and the failure direction was OPEN'
+    ).not.toContain('createScopeGate');
+  });
+
+  /**
+   * Steps 4, 5 and 6's seam. None of these is reachable from a behavioural suite, which builds its
+   * own app — and every one of them is a field whose ABSENCE would look like a smaller diff rather
+   * than a disabled step.
+   */
+  it('wires the credential minter, the dispatch seam and the named audit hole', () => {
+    const source = sourceOf('src/server.ts');
+    const options = transportOptionsIn(source);
+
+    expect(
+      source,
+      'the deployed root builds the production credential provider. Before this it was constructed and exported so the binding would not be an unused local, and nothing dispatched through it'
+    ).toContain('createUpstreamCredentialProvider(');
     expect(
       options,
-      'and the revocation checker it passes is the gate one, not the bare checker: the scope step reads the grant that checker established, and the bare one records nothing, so every scoped call would be refused'
-    ).toMatch(/revocation:\s*scopeGate\./);
+      'and hands it to the transport as a value. The only object literal that field accepts is the opt-out, so a binding here is the granting half'
+    ).toMatch(/credentials:\s*[A-Za-z_$]/);
+    expect(
+      options,
+      'the registry is given the per-app authorization lookup, which is the ONLY way dispatch can read what the request established. Omit it and every tool refuses'
+    ).toMatch(/\bauthorizationFor,/);
+    expect(
+      options,
+      'step 5 is NAMED, and what it names does nothing: src/audit/logger.ts has never been written, so a dispatch reaching a tool has no durable audit record behind it. The audit rule calls that a bypass rather than a fallback, and this pin is what keeps the gap visible in a gate instead of in a comment. Ticket 34 replaces the value'
+    ).toMatch(/auditEnqueue:\s*AUDIT_ENQUEUE_NOT_IMPLEMENTED/);
   });
 
   it('does wire a validator and a metadata pointer into the endpoint it builds', () => {

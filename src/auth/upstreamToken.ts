@@ -17,7 +17,7 @@ import type { ActiveGrant } from './revocation.ts';
  * Pinned per key type, never negotiated; absent types are refused. `rsa-pss` is deliberately
  * absent — Node cannot sign it here, so a row would name an algorithm that can never sign.
  *
- * ⚠️ RECORDED, NOT FIXED: `ed25519` yields `EdDSA`, which the authorization server's allowlist
+ * RECORDED, NOT FIXED: `ed25519` yields `EdDSA`, which the authorization server's allowlist
  * accepts but its verifier cannot check. An Ed25519 client key boots clean then fails every
  * request, reading as a deregistered client. Dropping the row would refuse it at startup instead
  * — a decision about both sides, and nobody owns it.
@@ -252,7 +252,7 @@ export interface UpstreamCredential {
   /**
    * Epoch ms after which this server stops reusing it, margin already subtracted.
    *
-   * ⚠️ **Governs reuse only, and may already be in the past on a fresh credential** — an issuer
+   * **Governs reuse only, and may already be in the past on a fresh credential** — an issuer
    * lifetime at or under the margin leaves nothing to reuse. Reading it as "expired, exchange
    * again" loops forever against such an issuer. Use what you were handed; consult this only when
    * deciding whether to reuse a previous one.
@@ -540,7 +540,7 @@ function assertGrantMatchesToken(ctx: ExchangeContext): void {
 /**
  * One exchange, no cache. Exported so the wire contract can be driven directly.
  *
- * ⚠️ **Here a bad endpoint URL escapes as a raw `TypeError`**, unlike every other failure, which
+ * **Here a bad endpoint URL escapes as a raw `TypeError`**, unlike every other failure, which
  * is converted. The provider guards the URL at construction so production cannot reach it.
  */
 export async function exchangeUpstreamCredential(

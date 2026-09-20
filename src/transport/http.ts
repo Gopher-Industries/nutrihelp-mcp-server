@@ -1,10 +1,16 @@
 import express, { type Express, type Request, type Response } from 'express';
-import { createMcpHandler, type McpServerFactory } from '@modelcontextprotocol/server';
+import {
+  createMcpHandler,
+  type AuthInfo,
+  type McpRequestContext,
+  type McpServerFactory,
+} from '@modelcontextprotocol/server';
 import { originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { errors, type JWTPayload } from 'jose';
 import { randomUUID } from 'node:crypto';
 import { KeySetUnavailableError, type TokenValidator } from '../auth/tokenValidator.ts';
-import type { RevocationChecker } from '../auth/revocation.ts';
+import type { ActiveGrant, RevocationChecker } from '../auth/revocation.ts';
+import type { UpstreamCredentialProvider } from '../auth/upstreamToken.ts';
 import { McpError } from '../errors.ts';
 import {
   insufficientScopeChallenge,
@@ -32,11 +38,73 @@ export interface RequestRouting {
  * Scope this request needs and the grant does not carry, or `undefined` if it suffices.
  * Must be one of this server's frozen scope names, never a value from a token or request.
  * Unset while no tool exists: absent resolver means nothing to check, not "check nothing".
+ *
+ * **Three arguments, because introspection is authoritative over the signed claim.** The grant is
+ * what live introspection returned for *this* request; `undefined` means no check established one
+ * and the resolver must refuse rather than fall back to the token. *(Widened here by ticket 87 —
+ * ticket 86 could not, being forbidden from touching this file, and bridged the gap with a shim
+ * that has since been deleted. The shape is ticket 49's, adopted rather than reinvented.)*
  */
 export type MissingScopeResolver = (
   routing: RequestRouting,
-  claims: JWTPayload
+  claims: JWTPayload,
+  grant: ActiveGrant | undefined
 ) => string | undefined;
+
+/**
+ * Everything one request established, held by object identity against the `AuthInfo` the SDK hands
+ * every tool handler back as `ctx.authInfo`. **The grant is carried, never rebuilt**: it is branded
+ * by `revocation.ts` and bound to a token digest, so a value reaching here is evidence that a live
+ * check ran for this exact token — and decomposing it into strings would throw that evidence away.
+ */
+export interface RequestAuthorization {
+  /** What live introspection returned for this request. Branded; never widened or forged. */
+  readonly grant: ActiveGrant;
+  /**
+   * The inbound access token. **Reachable only through this record**, never through `AuthInfo`,
+   * so a tool handler cannot forward it upstream as a bearer credential.
+   */
+  readonly subjectToken: string;
+  readonly correlationId: string;
+  /**
+   * Absolute epoch-ms instant the whole request must finish by — **not** a duration. A duration
+   * handed to a later stage is a fresh full budget wearing the right name; an instant cannot be
+   * re-spent.
+   */
+  readonly deadlineAt: number;
+  /** The clock `deadlineAt` was measured on. Injected so budget exhaustion is testable. */
+  readonly now: () => number;
+  /** Step 4, consumed lazily and only by a tool whose backing endpoint is credentialed. */
+  readonly credentialFor: UpstreamCredentialProvider['credentialFor'];
+}
+
+/**
+ * How dispatch reaches what the transport established.
+ *
+ * **The anti-forgery property is object IDENTITY, not field equality.** A JSON-decoded argument or
+ * a `_meta` blob with the same fields is a different object, so it is not a key in the map and the
+ * lookup misses. That is the whole mechanism; nothing here inspects the value handed in.
+ */
+export type AuthorizationLookup = (
+  authInfo: AuthInfo | undefined
+) => RequestAuthorization | undefined;
+
+/**
+ * The factory this module drives. The SDK's own `McpServerFactory` takes the request context
+ * alone; the second argument is how the composition root reaches the per-app lookup without
+ * importing this module's internals or inverting the import chain.
+ */
+export type AuthorizedServerFactory = (
+  ctx: McpRequestContext,
+  authorizationFor: AuthorizationLookup
+) => ReturnType<McpServerFactory>;
+
+/**
+ * `toNodeHandler` reads the authenticated identity off `req.auth` and passes it to the factory as
+ * `ctx.authInfo` **by reference**, which is what makes identity-keyed lookup work. Express's
+ * `Request` does not declare the field.
+ */
+type AuthenticatedRequest = Request & { auth?: AuthInfo };
 
 /**
  * Named opt-out for transport-only tests, mirroring `UnauthenticatedTransport`. Live grant
@@ -48,10 +116,27 @@ export interface RevocationDisabled {
   readonly revocationDisabled: 'transport-tests-only';
 }
 
+/**
+ * Named opt-out for transport-only tests, for the same reason as the two above: a request that
+ * reaches a credentialed tool with no provider must not quietly dispatch without one. The third
+ * sentinel, and `test/security/compositionRoot.test.ts` carries a third absence case for it.
+ */
+export interface CredentialsDisabled {
+  readonly credentialsDisabled: 'transport-tests-only';
+}
+
 export interface AuthorizationOptions {
   readonly validator: TokenValidator;
   /** Required — omit would silently skip live introspection; use `RevocationDisabled` to opt out. */
   readonly revocation: RevocationChecker | RevocationDisabled;
+  /**
+   * Step 4's minter, passed in rather than imported: the transport cannot import `src/server.ts`
+   * without inverting the import chain. **Required for the same reason `revocation` is** — an
+   * omitted field disables the step with nothing to notice it, where a literal reads as a decision
+   * in the diff. Nothing is exchanged here; the registry consumes it per tool, and only for a tool
+   * whose backing endpoint is credentialed.
+   */
+  readonly credentials: UpstreamCredentialProvider | CredentialsDisabled;
   /**
    * The **one** end-to-end budget for a request, not a per-call timeout. Offline validation
    * already spends from it — its key-set fetch is an outbound call — so introspection is handed
@@ -70,6 +155,25 @@ function checksRevocation(
 ): revocation is RevocationChecker {
   return 'assertGrantActive' in revocation;
 }
+
+/** Likewise: narrow on the capability, never on the opt-out's own property name. */
+function mintsCredentials(
+  credentials: UpstreamCredentialProvider | CredentialsDisabled
+): credentials is UpstreamCredentialProvider {
+  return 'credentialFor' in credentials;
+}
+
+/**
+ * The provider a request is handed when the composition opted out. It refuses rather than
+ * returning nothing, so the opt-out cannot be mistaken for a public backing endpoint: a tool that
+ * declares it needs a credential and is handed none must fail, not proceed without one.
+ */
+const REFUSES_TO_MINT: UpstreamCredentialProvider = {
+  credentialFor: () =>
+    Promise.reject(
+      new Error('the transport was composed on the credential opt-out, so no exchange can run')
+    ),
+};
 
 /**
  * Named opt-out for transport-only tests. A literal so it cannot be produced by forgetting
@@ -91,8 +195,11 @@ function authorizes(
 }
 
 export interface TransportOptions {
-  /** Fresh server instance per request. The core is stateless. */
-  readonly factory: McpServerFactory;
+  /**
+   * Fresh server instance per request. The core is stateless. Handed this app's authorization
+   * lookup as its second argument, which is how the registry reads what this request established.
+   */
+  readonly factory: AuthorizedServerFactory;
   readonly allowedOriginHostnames: readonly string[];
   /**
    * Required. The opt-out is a value, not an omitted field — omitting would disable auth
@@ -108,6 +215,19 @@ export interface TransportOptions {
 interface Denial {
   readonly status: number;
   readonly challenge?: string;
+}
+
+/**
+ * What the authorization stages concluded. A granted request carries the record dispatch will
+ * read — or `undefined` under the revocation opt-out, where no grant was ever established and so
+ * no `AuthInfo` is minted and every tool refuses.
+ */
+type Decision =
+  | { readonly outcome: 'denied'; readonly denial: Denial }
+  | { readonly outcome: 'granted'; readonly authorization: RequestAuthorization | undefined };
+
+function denied(denial: Denial): Decision {
+  return { outcome: 'denied', denial };
 }
 
 /** `Bearer <token>`, scheme matched case-insensitively per RFC 6750. */
@@ -192,11 +312,27 @@ export function createHttpApp(options: TransportOptions): Express {
   const app = express();
   app.disable('x-powered-by');
 
-  const handler = createMcpHandler(options.factory, {
-    // 2026-07-28 only; the default would serve 2025-era traffic.
-    legacy: 'reject',
-    ...(options.onError === undefined ? {} : { onerror: options.onError }),
-  });
+  /**
+   * **Closure-scoped, not module-scoped.** One app instance must not be able to answer another
+   * instance's request: a module-level map would be shared by every `createHttpApp` in a process,
+   * which is the shape a test harness makes real long before production does.
+   *
+   * Weak so an entry dies with the `AuthInfo` the request built, with no eviction policy to get
+   * wrong — and keyed by identity, which is what makes it unforgeable from request content.
+   */
+  const authorizations = new WeakMap<AuthInfo, RequestAuthorization>();
+
+  const authorizationFor: AuthorizationLookup = (authInfo) =>
+    authInfo === undefined ? undefined : authorizations.get(authInfo);
+
+  const handler = createMcpHandler(
+    (ctx: McpRequestContext) => options.factory(ctx, authorizationFor),
+    {
+      // 2026-07-28 only; the default would serve 2025-era traffic.
+      legacy: 'reject',
+      ...(options.onError === undefined ? {} : { onerror: options.onError }),
+    }
+  );
 
   // Adapter answers its own 500 then resolves, so this is the only way those surface.
   const mcpHandler = toNodeHandler(handler, {
@@ -217,14 +353,22 @@ export function createHttpApp(options: TransportOptions): Express {
     });
   }
 
-  async function denyReason(auth: AuthorizationOptions, req: Request): Promise<Denial | undefined> {
-    // One correlation id for every stage of this request.
-    const correlationId = randomUUID();
-
+  async function decide(
+    auth: AuthorizationOptions,
+    req: Request,
+    correlationId: string
+  ): Promise<Decision> {
     // The clock for this request's single budget. Started before the first stage that can spend
     // from it, so every later stage measures against the same origin.
     const clock = auth.now ?? Date.now;
     const startedAt = clock();
+
+    /**
+     * The one budget as an **instant**, computed once. Every later stage subtracts the clock from
+     * this, so no stage can be handed a fresh full duration — which is the defect ticket 71 exists
+     * for, and which shipped once already past a green gate.
+     */
+    const deadlineAt = startedAt + auth.requestDeadlineMs;
 
     // Routing first, unconditional: the next reader of these names (audit, scope) must not
     // inherit an unvalidated value just because no resolver is wired yet.
@@ -234,7 +378,7 @@ export function createHttpApp(options: TransportOptions): Express {
     };
     if (!isPlainRouting(routing.method) || !isPlainRouting(routing.name)) {
       report('bad_request.routing_header_not_plain');
-      return { status: 400 };
+      return denied({ status: 400 });
     }
 
     const authorizationHeader = headerValue(req.headers.authorization);
@@ -244,7 +388,7 @@ export function createHttpApp(options: TransportOptions): Express {
       if (authorizationHeader !== undefined) {
         report('unauthorized.malformed_credential');
       }
-      return { status: 401, challenge: unauthenticatedChallenge(resourceMetadataUrl) };
+      return denied({ status: 401, challenge: unauthenticatedChallenge(resourceMetadataUrl) });
     }
 
     let claims: JWTPayload;
@@ -256,25 +400,28 @@ export function createHttpApp(options: TransportOptions): Express {
       report(failure.code);
       if (failure.about === 'key_set') {
         // 401 would send every client refreshing against the component that is already down.
-        return { status: 503 };
+        return denied({ status: 503 });
       }
-      return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
+      return denied({ status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) });
     }
 
     // Between validation and scope; no exemption for tools/list or public backing endpoints.
+    let grant: ActiveGrant | undefined;
     if (checksRevocation(auth.revocation)) {
       // What is LEFT of the one budget, not a fresh copy of it. Offline validation above has
       // already spent from it — its key-set fetch goes out through the one door — so handing the
       // full value here would let a single request run to twice the configured deadline.
-      const remainingMs = auth.requestDeadlineMs - (clock() - startedAt);
+      const remainingMs = deadlineAt - clock();
       if (remainingMs <= 0) {
         // Exhausted before the check could run. Refuse rather than ask with no budget: an
         // unanswerable introspection is the retryable class, never an authentication failure.
         report('upstream_failure.deadline_exhausted');
-        return { status: 503 };
+        return denied({ status: 503 });
       }
       try {
-        await auth.revocation.assertGrantActive({
+        // **Captured, not discarded.** The grant is what steps 3 and 4 are entitled to read, and
+        // throwing it away here is what forced a connection-keyed shim that failed open.
+        grant = await auth.revocation.assertGrantActive({
           token,
           correlationId,
           deadlineMs: remainingMs,
@@ -282,38 +429,87 @@ export function createHttpApp(options: TransportOptions): Express {
       } catch (cause: unknown) {
         // Only authenticated active:false → 401. Unreachable / 5xx / malformed → retryable 503.
         if (cause instanceof McpError && cause.class === 'unauthorized') {
-          return { status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) };
+          return denied({ status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) });
         }
-        return { status: 503 };
+        return denied({ status: 503 });
       }
     }
 
-    const missingScope = auth.missingScopeFor?.(routing, claims);
+    const missingScope = auth.missingScopeFor?.(routing, claims, grant);
     if (missingScope !== undefined) {
       report(`insufficient_scope.${safeInOneLine(missingScope)}`);
-      return {
+      return denied({
         status: 403,
         challenge: insufficientScopeChallenge(resourceMetadataUrl, missingScope),
-      };
+      });
     }
 
-    return undefined;
+    if (grant === undefined) {
+      // The revocation opt-out. Nothing established a grant, so nothing is bound to the request
+      // and every tool refuses at dispatch — the transport-only posture, stated rather than faked.
+      return { outcome: 'granted', authorization: undefined };
+    }
+
+    const credentials = mintsCredentials(auth.credentials) ? auth.credentials : REFUSES_TO_MINT;
+    return {
+      outcome: 'granted',
+      authorization: {
+        grant,
+        subjectToken: token,
+        correlationId,
+        deadlineAt,
+        now: clock,
+        credentialFor: credentials.credentialFor,
+      },
+    };
+  }
+
+  /**
+   * The identity every tool handler can read, as `ctx.authInfo`.
+   *
+   * **`token` carries the token's DIGEST, not the token, and that DEVIATES from the SDK's
+   * documented meaning of this field — it is deliberate, decided by the team lead, and must not be
+   * "corrected".** `AuthInfo` reaches every handler, and a handler that forwards `token` upstream
+   * as a bearer credential breaks the no-passthrough rule; one branch already does exactly that. A digest
+   * makes that forwarding fail loudly at the backend instead of working. The real token stays in
+   * `RequestAuthorization`, which only the registry can reach.
+   *
+   * `clientId` and `scopes` come from the **grant**, never from the JWT claims: introspection is
+   * authoritative, and a token minted before a user narrowed a connection still carries the wider
+   * claim.
+   */
+  function authInfoFor(authorization: RequestAuthorization): AuthInfo {
+    return {
+      token: authorization.grant.tokenDigest,
+      clientId: authorization.grant.clientId,
+      scopes: [...authorization.grant.scopes],
+    };
   }
 
   async function authorizeThenDispatch(
     auth: AuthorizationOptions,
     req: Request,
-    res: Response
+    res: Response,
+    correlationId: string
   ): Promise<void> {
-    const denial = await denyReason(auth, req);
-    if (denial !== undefined) {
-      res.status(denial.status);
-      if (denial.challenge !== undefined) {
-        res.set('WWW-Authenticate', denial.challenge);
+    const decision = await decide(auth, req, correlationId);
+    if (decision.outcome === 'denied') {
+      res.status(decision.denial.status);
+      if (decision.denial.challenge !== undefined) {
+        res.set('WWW-Authenticate', decision.denial.challenge);
       }
       res.end();
       return;
     }
+
+    if (decision.authorization !== undefined) {
+      const authInfo = authInfoFor(decision.authorization);
+      authorizations.set(authInfo, decision.authorization);
+      // The SDK passes this object through by reference, so what the registry looks up is the
+      // very object written here — which is what makes identity the anti-forgery property.
+      (req as AuthenticatedRequest).auth = authInfo;
+    }
+
     dispatch(req, res);
   }
 
@@ -333,11 +529,20 @@ export function createHttpApp(options: TransportOptions): Express {
 
     const auth = options.authorization;
     if (!authorizes(auth)) {
+      // The transport-only opt-out. No stage runs, nothing is reported and nothing goes upstream,
+      // so there is nothing to correlate — and minting an identifier above this line would create
+      // one per request that no record ever carries. Said here because "minted per request" and
+      // "minted and discarded on one path" read identically at the call site.
       dispatch(req, res);
       return;
     }
 
-    void authorizeThenDispatch(auth, req, res).catch((cause: unknown) => {
+    // One id for every stage, minted HERE so it precedes every stage that reports and every
+    // stage that calls out. It used to be minted where the first stage needing it ran — after
+    // routing validation and the credential check — so the earliest refusals carried none.
+    const correlationId = randomUUID();
+
+    void authorizeThenDispatch(auth, req, res, correlationId).catch((cause: unknown) => {
       options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
       if (!res.headersSent) {
         res.status(500).end();

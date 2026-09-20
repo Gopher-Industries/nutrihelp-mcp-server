@@ -8,10 +8,10 @@ import { protectedResourceMetadata } from './auth/metadata.ts';
 import { protectedResourceMetadataUrl } from './auth/challenge.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createRevocationChecker } from './auth/revocation.ts';
-import { createScopeGate } from './auth/scopes.ts';
+import { missingScopeFor } from './auth/scopes.ts';
 import { createUpstreamCredentialProvider } from './auth/upstreamToken.ts';
 import { createHttpApp } from './transport/http.ts';
-import { registerTools } from './tools/registry.ts';
+import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from './tools/registry.ts';
 
 const config = loadConfig();
 
@@ -47,22 +47,6 @@ const revocationChecker = createRevocationChecker({
 });
 
 /**
- * Step 3. The frozen map decides what a request needs; the gate is what lets that decision see the
- * grant introspection just established, because the transport discards it today (ticket 87).
- *
- * ⚠️ **`scopeGate.revocation` is what the transport is handed, never `revocationChecker`.** The
- * gate delegates every call to the checker above and adds nothing to the answer — but wiring the
- * bare checker would leave the scope step with no live grant to read, and it fails closed, so
- * every scoped tool call would be refused rather than anything looking broken.
- */
-const scopeGate = createScopeGate(revocationChecker, {
-  now: () => Date.now(),
-  // The one request budget. An entry the scope step has not taken within it is one no request is
-  // still waiting for, which is what makes evicting it free.
-  maxAgeMs: config.requestDeadlineMs,
-});
-
-/**
  * Same join, and it must **NOT** equal the introspection URL: the authorization server accepts an
  * assertion only at the endpoint the assertion names, so one shared value fails client
  * authentication at whichever endpoint it was not minted for.
@@ -74,13 +58,14 @@ const scopeGate = createScopeGate(revocationChecker, {
 const tokenEndpointUrl = new URL('/api/oauth/token', config.authServerUrl).href;
 
 /**
- * Built here so composition is real rather than described; nothing dispatches through it yet.
+ * Step 4's minter. **Passed into `createHttpApp` as a required field**, the way the revocation
+ * checker is — the transport cannot import this file without inverting the import chain, and an
+ * omitted field would disable a step of the mandatory order with nothing to notice it.
  *
- * Exported only so the binding is not an unused local. **That is NOT how the next ticket reaches
- * it** — the transport cannot import this file without inverting the import chain, so the
- * provider will be passed into `createHttpApp` the way the revocation checker already is.
+ * It is not consumed here and not consumed by the transport: the registry takes it per tool, and
+ * only for a tool whose backing endpoint is credentialed.
  */
-export const upstreamCredentialProvider = createUpstreamCredentialProvider({
+const upstreamCredentialProvider = createUpstreamCredentialProvider({
   tokenEndpointUrl,
   clientId: config.clientId,
   clientAssertionKey: config.clientAssertionKey,
@@ -93,14 +78,27 @@ export const upstreamCredentialProvider = createUpstreamCredentialProvider({
   },
 });
 
+/** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
+const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
+
 const app = createHttpApp({
-  factory: (ctx) => {
+  factory: (ctx, authorizationFor) => {
     const server = new McpServer({
       name: 'nutrihelp-mcp-server',
       version: '1.0.0',
     });
 
-    registerTools(server, ctx, config);
+    registerTools(server, ctx, {
+      nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
+      // How dispatch reads what this request established. Handed in rather than imported: the
+      // WeakMap is scoped to this app instance, so one instance cannot answer another's request.
+      authorizationFor,
+      resourceMetadataUrl,
+      // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
+      // so every dispatch reaching a tool today has no durable audit record behind it. Stated
+      // here rather than omitted: a composition that skips the field would read as satisfied.
+      auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+    });
 
     return server;
   },
@@ -111,9 +109,12 @@ const app = createHttpApp({
   }),
   authorization: {
     validator: tokenValidator,
-    revocation: scopeGate.revocation,
+    revocation: revocationChecker,
+    credentials: upstreamCredentialProvider,
     requestDeadlineMs: config.requestDeadlineMs,
-    missingScopeFor: scopeGate.missingScopeFor,
+    // Step 3, straight from the frozen map. The transport carries the grant introspection just
+    // established into this call as the third argument, so no hand-off record is involved.
+    missingScopeFor,
   },
   onError: (error: Error) => {
     // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.

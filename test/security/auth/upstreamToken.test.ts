@@ -11,7 +11,7 @@
  * it) and a real `undici` `MockAgent` under it. Assertions read `wireCalls()`, so they are about
  * bytes that reached a dispatcher rather than about arguments a function was called with.
  *
- * ⚠️ **The load-bearing case is the whole-transcript scan.** The three narrower ones are all
+ * **The load-bearing case is the whole-transcript scan.** The three narrower ones are all
  * satisfied by an exchange pointed at the wrong host: only the scan asks who the **recipient**
  * was, rather than what the request looked like. Proved by mutation — repointing the exchange
  * URL at the data backend leaves the other three green and turns that one red.
