@@ -237,6 +237,31 @@ describe('the composition root', () => {
     ).toMatch(/requestDeadlineMs:\s*config\.requestDeadlineMs/);
   });
 
+  /**
+   * Step 3 of the mandatory order, asserted as **supplied** rather than as written.
+   * `missingScopeFor` is optional on the transport, and for the whole of the project's history the
+   * root did not pass it — so the pre-dispatch 403 was built, tested through an injected resolver,
+   * and unreachable from a deployed server. Dropping this line again is a silent regression: every
+   * behavioural suite builds its own app and would stay green.
+   */
+  it('supplies the scope step, so the pre-dispatch 403 is reachable from a deployed root', () => {
+    const source = sourceOf('src/server.ts');
+    const options = transportOptionsIn(source);
+
+    expect(
+      source,
+      'the root builds the gate from the frozen map. Anchored on the call rather than a variable name'
+    ).toContain('createScopeGate(');
+    expect(
+      options,
+      'and hands the transport the resolver. Absent, the field is simply omitted and every scoped tool call dispatches with no scope check at all'
+    ).toMatch(/missingScopeFor:\s*[A-Za-z_$]/);
+    expect(
+      options,
+      'and the revocation checker it passes is the gate one, not the bare checker: the scope step reads the grant that checker established, and the bare one records nothing, so every scoped call would be refused'
+    ).toMatch(/revocation:\s*scopeGate\./);
+  });
+
   it('does wire a validator and a metadata pointer into the endpoint it builds', () => {
     const source = sourceOf('src/server.ts');
 
