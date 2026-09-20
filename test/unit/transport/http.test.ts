@@ -29,6 +29,7 @@ import type {
 } from '../../../src/auth/revocation.ts';
 import { McpError } from '../../../src/errors.ts';
 import { protectedResourceMetadata } from '../../../src/auth/metadata.ts';
+import { forgeActiveGrant } from '../../support/activeGrant.ts';
 import {
   ALL_SCOPES,
   ALLOWED_ORIGIN,
@@ -62,13 +63,16 @@ const VERIFIED_CLAIMS: JWTPayload = {
 /** The sentinel encoded form: a routing value that is not already plain. */
 const ENCODED_ROUTING_VALUE = '=?utf-8?B?dG9vbHMvbGlzdA==?=';
 
-/** What a granting introspection hands back. Fixed values so nothing is read out of the token. */
-const ACTIVE_GRANT: ActiveGrant = {
+/**
+ * What a granting introspection hands back. Fixed values so nothing is read out of the token.
+ * Forged: `ActiveGrant` is branded by the module that mints it, and only that module can.
+ */
+const ACTIVE_GRANT: ActiveGrant = forgeActiveGrant({
   grantId: GRANT_A,
   scopes: ALL_SCOPES,
   subject: USER_A,
   clientId: CLIENT_ID,
-};
+});
 
 /** The probe's request budget. Every introspection slice is measured against it. */
 const PROBE_REQUEST_DEADLINE_MS = 30_000;

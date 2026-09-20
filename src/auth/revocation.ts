@@ -7,9 +7,9 @@
  */
 
 import { createHash, type KeyObject } from 'node:crypto';
-import { McpError } from '../errors.ts';
+import { McpError, classifyRequestFailure, type RequestFailureKind } from '../errors.ts';
 import { postFormWithoutCredential } from '../upstream/client.ts';
-import { CLIENT_ASSERTION_TYPE, clientAssertion } from './upstreamToken.ts';
+import { CLIENT_ASSERTION_TYPE, clientAssertion, subjectTokenDigest } from './upstreamToken.ts';
 
 /** Log-side endpoint class. Never the path: a path in a log payload is still a path. */
 const ENDPOINT_CLASS = 'authorization_server_introspection';
@@ -21,60 +21,67 @@ const ERROR_CODES = {
   malformed: 'introspection_malformed',
   /** Own credential could not be built: configuration fault, not the network. */
   assertion: 'introspection_assertion_unbuildable',
-  /**
-   * Egress door refused the request (unusable deadline or identity guard). Not `unreachable`:
-   * neither clears on retry. Malformed URLs do not land here (`fetch` + `cause`, or
-   * `requireHttpsUrl` at construction).
-   */
+  /** Egress door refused it. Not `unreachable`: neither clears on retry. */
   request: 'introspection_request_unbuildable',
   /** Request-budget slice ran out before the issuer answered. */
   timeout: 'introspection_timeout',
 } as const;
 
 /**
- * Why a request never produced a response. Measured on Node v24.19.0; the obvious
- * discriminator is backwards:
- *   - unresolvable host: `TypeError: fetch failed` **with** `cause`;
- *   - spent deadline: `TimeoutError` / `AbortError` (not a `TypeError`);
- *   - egress refusal: `TypeError` with **no** `cause`.
- * Match abort by name; use `cause` to separate undici from our door.
+ * Shared classifier, own codes. A code naming an endpoint is what tells an operator which call
+ * never answered; one shared set would say "introspection" when an exchange failed.
  */
-function classifyRequestFailure(cause: unknown): {
-  readonly errorCode: string;
-  readonly statusClass: string;
-} {
-  if (cause instanceof Error && (cause.name === 'TimeoutError' || cause.name === 'AbortError')) {
-    return { errorCode: ERROR_CODES.timeout, statusClass: 'timeout' };
-  }
-  if (cause instanceof TypeError && cause.cause === undefined) {
-    return { errorCode: ERROR_CODES.request, statusClass: 'unusable_request' };
-  }
-  return { errorCode: ERROR_CODES.unreachable, statusClass: 'unreachable' };
-}
+const FAILURE_ERROR_CODES: Readonly<Record<RequestFailureKind, string>> = {
+  timeout: ERROR_CODES.timeout,
+  unusable_request: ERROR_CODES.request,
+  unreachable: ERROR_CODES.unreachable,
+};
 
-/** Fields the authorization server returns only when the grant is active. */
+/** Not exported, and that is the mechanism: no other module can name it, so none can forge one. */
+declare const activeGrantBrand: unique symbol;
+
+/**
+ * Fields the authorization server returns only when the grant is active.
+ *
+ * **Branded**, so a function taking one cannot be called without a value this module produced —
+ * and it produces one only after a live check answered `active: true`. Forging one still needs an
+ * `as unknown as` double cast, visible in review; that is the contract, not a gap in it.
+ *
+ * **`tokenDigest` is the other half, and it is why the brand alone was not enough.** The brand
+ * says a check RAN, not *which token* it ran for: the grant for token B paired with subject token
+ * A typechecked, as did one grant held for the whole process. Consumers refuse a mismatch.
+ *
+ * ⚠️ Still **no freshness claim** — there is no timestamp. What bounds that today is that a grant
+ * is minted per request and discarded with it.
+ */
 export interface ActiveGrant {
   readonly grantId: string;
   readonly scopes: readonly string[];
   readonly subject: string;
   readonly clientId: string;
+  /**
+   * Digest of the token this check ran against; present at runtime, unlike the brand. The digest
+   * and never the token — this outlives the request in a caller's cache key.
+   */
+  readonly tokenDigest: string;
+  /** Type-level only. Never present at runtime and never read. */
+  readonly [activeGrantBrand]: true;
+}
+
+/** The one place the brand is applied, so "who can mint one" is a single readable line. */
+function mintActiveGrant(fields: Omit<ActiveGrant, typeof activeGrantBrand>): ActiveGrant {
+  return fields as ActiveGrant;
 }
 
 export interface RevocationCheckerOptions {
   /** Absolute URL of `POST /api/oauth/introspect`. */
   readonly introspectionUrl: string;
-  /**
-   * Registered client id, threaded into the assertion. No default or derivation.
-   * Parameter (not config) until the client-id gap is settled. Not the resource id.
-   */
+  /** Registered client id for the assertion. No default or derivation. Not the resource id. */
   readonly clientId: string;
   readonly clientAssertionKey: KeyObject;
   /** `WWW-Authenticate` challenge when the grant is gone. */
   readonly resourceMetadataUrl: string;
-  /**
-   * How long an `active: false` may be reused, in ms. 0 disables it.
-   * Never caches an active answer; can only refuse faster, never permit.
-   */
+  /** How long an `active: false` may be reused, ms; 0 disables. Can refuse faster, never permit. */
   readonly negativeCacheMaxAgeMs: number;
   /** Injected so cache expiry is testable without waiting. */
   readonly now: () => number;
@@ -151,10 +158,7 @@ function readIdentity(
   return { grantId, subject, clientId };
 }
 
-/**
- * Token travels in the body, so `http:` would put a live credential on the wire.
- * No config variable for this URL; guard the parameter here.
- */
+/** The token travels in the body, so `http:` would publish a live credential. */
 function requireHttpsUrl(value: string): string {
   let url: URL;
   try {
@@ -182,25 +186,22 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
   const introspectionUrl = requireHttpsUrl(options.introspectionUrl);
 
   /**
-   * Negative answers only, keyed by the digest below rather than the token. An entry is read only
-   * while younger than the TTL, and a hit refuses. There is deliberately no positive counterpart,
-   * because a cached "active" is exactly what would let a revoked grant keep working.
+   * Negative answers only. No positive counterpart, deliberately: a cached "active" is exactly
+   * what would let a revoked grant keep working.
    */
   const inactiveUntil = new Map<string, number>();
 
   /**
-   * Keyed by digest, never by the token. The map outlives any single request, so holding raw
-   * access tokens in it would keep credentials in process memory long past their usefulness for
-   * no gain — the digest answers "same token?" just as well.
+   * Keyed by digest, never by the token: this map outlives the request, and the digest answers
+   * "same token?" just as well.
    */
   function cacheKey(token: string): string {
     return createHash('sha256').update(token).digest('base64url');
   }
 
   /**
-   * Drop everything already expired. Called on write, because the alternative — evicting only
-   * when the same token is presented again — never reclaims an entry for a token that is simply
-   * never seen twice, and that is the common case. Without it the map only grows.
+   * On write: evicting only when the same token returns never reclaims an entry for a token seen
+   * once, and that is the common case. Without this the map only grows.
    */
   function evictExpired(asOf: number): void {
     for (const [key, expiresAt] of inactiveUntil) {
@@ -253,12 +254,9 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
   }
 
   /**
-   * The response to an explicit boolean, or an upstream failure.
-   *
-   * Every path that reaches a RESPONSE is resolved here. Two unestablished paths deliberately do
-   * not pass through: the assertion could not be built, and the request was refused or never
-   * answered — both above, both already converted. Checking that none of the four returns a
-   * decision means reading three places, not one.
+   * Every path that reaches a RESPONSE resolves here. Two unestablished paths deliberately do not:
+   * the assertion could not be built, and the request was never answered — both already converted
+   * above. Checking that none of the four returns a decision means reading three places.
    */
   async function resolveActive(
     response: Response,
@@ -291,9 +289,9 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
       );
     }
 
-    // `readActive` only yields a boolean for a record, so `payload` is one here. Narrowed rather
-    // than re-tested: a defensive `isRecord` ternary at this point can never take its else arm,
-    // and an unreachable branch is an uncovered branch that reads like a guard.
+    // `readActive` yields a boolean only for a record, so `payload` is one. Narrowed rather than
+    // re-tested: a defensive ternary here can never take its else arm, and an unreachable branch
+    // is an uncovered branch that reads like a guard.
     return { active, record: payload as Record<string, unknown> };
   }
 
@@ -302,11 +300,9 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
 
     refuseIfCachedInactive(request.token, request.correlationId, startedAt);
 
-    // A key that cannot sign, or a client identifier that was never supplied, throws here. It
-    // still fails closed, but a raw TypeError or DOMException escaping the authorization path is
-    // one the transport's class-based mapping does not recognise — so it is converted to the
-    // retryable class like any other reason the issuer could not be asked. The distinct code is
-    // what tells an operator this was our own credential and not the network.
+    // A key that cannot sign, or a client id nobody supplied. Fails closed either way, but a raw
+    // TypeError escaping the authorization path is one the transport's class-based mapping does
+    // not recognise, so it is converted; the distinct code says this was ours, not the network.
     let assertion: string;
     try {
       assertion = await clientAssertion({
@@ -340,11 +336,15 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
         redirect: 'error',
       });
     } catch (cause) {
-      // Three distinct causes, three records. Folding them together would tell the client to
-      // retry a fault that never clears, or tell the operator a timeout happened when nothing
-      // timed out. The classifier documents why the shapes are not what they look like.
-      const { errorCode, statusClass } = classifyRequestFailure(cause);
-      throw unavailable(request.correlationId, errorCode, statusClass, options.now() - startedAt);
+      // Three causes, three records. Folded together they would tell a client to retry a fault
+      // that never clears, or an operator that a timeout happened when nothing timed out.
+      const kind = classifyRequestFailure(cause);
+      throw unavailable(
+        request.correlationId,
+        FAILURE_ERROR_CODES[kind],
+        kind,
+        options.now() - startedAt
+      );
     }
 
     const { active, record } = await resolveActive(response, request.correlationId, startedAt);
@@ -372,8 +372,13 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
       );
     }
 
-    // Active. Deliberately not cached, in either direction.
-    return { ...identity, scopes: readScopes(record) };
+    // Active. Deliberately not cached, in either direction. The digest binds this answer to the
+    // token it was asked about, so a consumer cannot pair it with a different one.
+    return mintActiveGrant({
+      ...identity,
+      scopes: readScopes(record),
+      tokenDigest: subjectTokenDigest(request.token),
+    });
   }
 
   return { assertGrantActive };

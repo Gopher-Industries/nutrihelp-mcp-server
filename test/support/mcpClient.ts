@@ -28,6 +28,7 @@ import {
   type RevocationChecker,
   type SecurityEvent,
 } from '../../src/auth/revocation.ts';
+import { forgeActiveGrant } from './activeGrant.ts';
 import {
   ALL_SCOPES,
   ALLOWED_ORIGIN,
@@ -109,13 +110,16 @@ const FIXTURE_CLIENT_ASSERTION_KEY = generateKeyPairSync('ec', {
   namedCurve: 'P-256',
 }).privateKey;
 
-/** Grant shape returned by the default always-active checker. */
-const FIXTURE_ACTIVE_GRANT: ActiveGrant = {
+/**
+ * Grant shape returned by the default always-active checker. Forged, because `ActiveGrant` is
+ * branded by the module that mints it — see `forgeActiveGrant` for why the cast lives there.
+ */
+const FIXTURE_ACTIVE_GRANT: ActiveGrant = forgeActiveGrant({
   grantId: GRANT_A,
   scopes: ALL_SCOPES,
   subject: USER_A,
   clientId: CLIENT_ID,
-};
+});
 
 /**
  * Narrow on the checker, not the sentinel — same excess-property trap as the transport: a union

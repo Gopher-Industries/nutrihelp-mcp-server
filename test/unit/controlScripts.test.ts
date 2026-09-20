@@ -41,7 +41,12 @@ function filesNamedBy(invocation: string): readonly string[] {
   return rest.filter((token) => token !== 'run' && !token.startsWith('-'));
 }
 
-const MINIMUM_CONTROL_INVOCATIONS = 3;
+/**
+ * A floor, not a count: the file list is policy and lives in `package.json`. Raised to 4 when
+ * the token-disclosure proof joined, because a floor that stays below what is chained lets
+ * the newest control be dropped without going red.
+ */
+const MINIMUM_CONTROL_INVOCATIONS = 4;
 
 describe('the shape of test:controls', () => {
   it('runs vitest once per control file, never one command with several filters', () => {

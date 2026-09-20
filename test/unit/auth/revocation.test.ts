@@ -14,7 +14,7 @@ import {
   type RevocationChecker,
   type SecurityEvent,
 } from '../../../src/auth/revocation.ts';
-import { CLIENT_ASSERTION_TYPE } from '../../../src/auth/upstreamToken.ts';
+import { CLIENT_ASSERTION_TYPE, subjectTokenDigest } from '../../../src/auth/upstreamToken.ts';
 import { CORRELATION_ID_HEADER } from '../../../src/upstream/client.ts';
 import { createTestKeyPair, makeToken, type TestKeyPair } from '../../../scripts/makeToken.ts';
 import {
@@ -213,6 +213,10 @@ describe('a live grant', () => {
       scopes: [SCOPES.nutritionRead, SCOPES.mealplanRead, SCOPES.meallogWrite],
       subject: USER_A,
       clientId: CLIENT_ID,
+      // Computed with the production function rather than typed out: a hand-written digest here
+      // would be a second statement of the algorithm, and it would drift silently, because a
+      // wrong digest presents downstream as a check that simply always refuses.
+      tokenDigest: subjectTokenDigest(accessToken),
     });
 
     expect(operational, 'a successful check is not an operational event').toHaveLength(0);
@@ -228,6 +232,7 @@ describe('a live grant', () => {
       scopes: [],
       subject: USER_A,
       clientId: CLIENT_ID,
+      tokenDigest: subjectTokenDigest(accessToken),
     });
   });
 });
@@ -930,7 +935,37 @@ describe('an active answer must carry its identity', () => {
       scopes: [SCOPES.nutritionRead, SCOPES.mealplanRead, SCOPES.meallogWrite],
       subject: USER_A,
       clientId: CLIENT_ID,
+      tokenDigest: subjectTokenDigest(accessToken),
     });
+  });
+
+  /**
+   * The digest is what binds this answer to the token it was asked about, and it is the half of
+   * the ordering rule the brand cannot express. Asserted as a DISCRIMINATING value rather than
+   * merely present: a digest of the wrong token, or a constant, satisfies "is a non-empty string"
+   * while making every downstream binding check refuse or, worse, accept the wrong pairing.
+   */
+  it('binds the answer to the token it was asked about, and to no other', async () => {
+    upstream.introspect({ ...ACTIVE_PAYLOAD });
+    const { checker } = makeChecker();
+
+    const grant = await checker.assertGrantActive({
+      token: accessToken,
+      correlationId: CORRELATION_ID,
+      deadlineMs: DEADLINE_MS,
+    });
+
+    expect(grant.tokenDigest, 'the digest of the token this check actually ran against').toBe(
+      subjectTokenDigest(accessToken)
+    );
+    expect(
+      grant.tokenDigest,
+      'and not of some other token, which a constant or a mis-wired argument would produce'
+    ).not.toBe(subjectTokenDigest(secondAccessToken));
+    expect(
+      grant.tokenDigest,
+      'the digest, never the token: this value outlives the request in a caller cache key'
+    ).not.toContain(accessToken);
   });
 });
 

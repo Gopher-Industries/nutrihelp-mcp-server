@@ -5,7 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { AUTH_SERVER_ORIGIN, INTROSPECTION_PATH } from '../support/testEnv.ts';
+import { AUTH_SERVER_ORIGIN, INTROSPECTION_PATH, TOKEN_EXCHANGE_PATH } from '../support/testEnv.ts';
 
 /**
  * Literal, not imported — importing would stay green if the sentinel were renamed.
@@ -42,6 +42,33 @@ function introspectionPathLiteralIn(source: string): string {
     'control: the root resolves a literal path against the configured authorization server. If this stops matching, the URL is being built some other way and this pin has stopped guarding anything — re-derive it rather than deleting it'
   ).not.toBeNull();
   return match?.[2] ?? '';
+}
+
+/**
+ * Every path literal the root resolves against the configured authorization server, **sorted**.
+ * `introspectionPathLiteralIn` above reads the first match only, which is correct while
+ * introspection is written first — this reads the whole set, so a second endpoint cannot arrive
+ * without landing in the assertions below. Sorted rather than left in source order on purpose:
+ * reordering two unrelated declarations is not a security change and must not redden a control.
+ */
+function authServerPathLiteralsIn(source: string): string[] {
+  const matches = source.matchAll(/new URL\(\s*(['"])([^'"]*)\1\s*,\s*config\.authServerUrl\s*\)/g);
+  return [...matches].map((match) => match[2] ?? '').sort();
+}
+
+/**
+ * The arguments the root hands `createUpstreamCredentialProvider`, nothing before. Scoped the way
+ * `transportOptionsIn` is: `clientId` is passed to the revocation checker under the same name a
+ * few lines above, so a whole-file match would be satisfied by that one and would say nothing
+ * about this one.
+ */
+function credentialProviderOptionsIn(source: string): string {
+  const start = source.indexOf('createUpstreamCredentialProvider(');
+  expect(
+    start,
+    'control: the root builds the credential provider, or this scan reads nothing'
+  ).toBeGreaterThan(-1);
+  return source.slice(start);
 }
 
 describe('the composition root', () => {
@@ -157,6 +184,45 @@ describe('the composition root', () => {
       new URL(literal, `${AUTH_SERVER_ORIGIN}/tenant/acme`).href,
       'and against one deployed under a path, that path is DROPPED rather than prefixed. Asserted rather than described: an authorization server at /tenant/acme would be introspected at the origin root, which answers 404, which surfaces as a retryable outage nobody can tell apart from the server being down'
     ).toBe(`${AUTH_SERVER_ORIGIN}${INTROSPECTION_PATH}`);
+  });
+
+  /**
+   * The two authorization-server endpoints this root derives, and the thing that must not
+   * happen to them: collapsing into one value. The assertion audience of a client assertion is
+   * the exact endpoint being called, and each endpoint accepts only its own — so a root reusing
+   * one URL fails client authentication at whichever endpoint the assertion was not minted for,
+   * which surfaces as a deregistered client rather than as a wiring mistake.
+   */
+  it('derives the token endpoint too, from the same configured origin and not from a second literal', () => {
+    const source = sourceOf('src/server.ts');
+    const literals = authServerPathLiteralsIn(source);
+
+    expect(
+      literals,
+      'control: the root resolves literal paths against the configured authorization server. If this returns nothing, the URLs are being built some other way and this pin has stopped guarding — re-derive it rather than deleting it'
+    ).not.toHaveLength(0);
+    expect(
+      literals,
+      'both endpoints, each written once, and therefore NOT collapsed into one value: an assertion minted for introspection is refused at the token endpoint and the other way round. Compared with toEqual rather than toContain, because a suffix is exactly the drift a derived path suffers'
+    ).toEqual([INTROSPECTION_PATH, TOKEN_EXCHANGE_PATH].sort());
+
+    const options = credentialProviderOptionsIn(source);
+    expect(
+      options,
+      'signed as the registered client identifier READ FROM CONFIGURATION. Asserted positively and scoped to this call: every absence check below is satisfied by a hardcoded identifier, and a whole-file match for this pattern is satisfied by the revocation checker a few lines above'
+    ).toMatch(/clientId:\s*config\.clientId/);
+    expect(
+      options,
+      'and never the resource identifier, which the loader refuses to start on when the two are equal'
+    ).not.toMatch(/clientId:\s*config\.resourceIdentifier/);
+    expect(
+      options,
+      'and the signing key is the configured one rather than anything assembled here'
+    ).toMatch(/clientAssertionKey:\s*config\.clientAssertionKey/);
+    expect(
+      source,
+      'and the origin comes from configuration rather than a second absolute URL written out here'
+    ).not.toMatch(/tokenEndpointUrl:\s*['"]https:/);
   });
 
   /**
