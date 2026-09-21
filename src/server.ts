@@ -9,9 +9,10 @@ import { protectedResourceMetadata } from './auth/metadata.ts';
 import { protectedResourceMetadataUrl } from './auth/challenge.ts';
 import { createTokenValidator } from './auth/tokenValidator.ts';
 import { createRevocationChecker } from './auth/revocation.ts';
+import { missingScopeFor } from './auth/scopes.ts';
 import { createUpstreamCredentialProvider } from './auth/upstreamToken.ts';
 import { createHttpApp } from './transport/http.ts';
-import { registerTools } from './tools/registry.ts';
+import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from './tools/registry.ts';
 
 import { connectKeyValue, type KeyValueConnection } from './upstream/client.ts';
 import { ConfirmationError } from './errors.ts';
@@ -55,11 +56,29 @@ export function startServer() {
    */
   const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
 
+const tokenValidator = createTokenValidator({
+    jwksUrl: config.jwksUrl,
+    expectedIssuer: config.expectedIssuer,
+    expectedAudience: config.resourceIdentifier,
+    cacheMaxAgeMs: config.jwksCacheMaxAgeMs,
+    requestDeadlineMs: config.requestDeadlineMs,
+    // Unset on purpose: key-set fetches use the default egress adapter.
+  });
+
+  /**
+   * Joined rather than configured: the host is configured and the path is fixed by the contract, so
+   * a seventeenth variable would let the two drift for a value neither side may choose alone.
+   */
+  const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
+
+  /** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
+  const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
+
   const revocationChecker = createRevocationChecker({
     introspectionUrl,
     clientId: config.clientId,
     clientAssertionKey: config.clientAssertionKey,
-    resourceMetadataUrl: protectedResourceMetadataUrl(config.resourceIdentifier),
+    resourceMetadataUrl,
     negativeCacheMaxAgeMs: config.revokedGrantCacheMaxAgeMs,
     now: () => Date.now(),
     // Operational vs security: shared sink today, separated by `channel`.
@@ -83,10 +102,12 @@ export function startServer() {
   const tokenEndpointUrl = new URL('/api/oauth/token', config.authServerUrl).href;
 
   /**
-   * Built here so composition is real rather than described; nothing dispatches through it yet.
+   * Step 4's minter. **Passed into `createHttpApp` as a required field**, the way the revocation
+   * checker is — the transport cannot import this file without inverting the import chain, and an
+   * omitted field would disable a step of the mandatory order with nothing to notice it.
    *
-   * Returned for composition, not imported by transport or tools. The provider will be passed
-   * into `createHttpApp` the way the revocation checker already is.
+   * It is not consumed here and not consumed by the transport: the registry takes it per tool, and
+   * only for a tool whose backing endpoint is credentialed.
    */
   const upstreamCredentialProvider = createUpstreamCredentialProvider({
     tokenEndpointUrl,
@@ -102,13 +123,36 @@ export function startServer() {
   });
 
   const app = createHttpApp({
-    factory: (ctx) => {
+    factory: (ctx, authorizationFor) => {
       const server = new McpServer({
         name: 'nutrihelp-mcp-server',
         version: '1.0.0',
       });
 
-      registerTools(server, ctx, config);
+      registerTools(server, ctx, {
+        nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
+        // How dispatch reads what this request established. Handed in rather than imported: the
+        // WeakMap is scoped to this app instance, so one instance cannot answer another's request.
+        authorizationFor,
+        // The security channel, same shape and same sink as the revocation checker's above. A
+        // dispatch denied at the trust boundary is security-relevant, and without this the refusal
+        // is thrown into the SDK where nothing ever calls toLog() — so the identifiers an operator
+        // needs are built and discarded, and the cheapest denials are the only ones reported.
+        logSecurity: (event) => {
+          console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
+        },
+        // And its operational twin, the same pair the revocation checker takes above. A spent
+        // request budget is ordinary backend slowness reported by every outbound call, so filing it
+        // on the security channel would put one record per slow request in front of the denials.
+        logOperational: (event) => {
+          console.error(JSON.stringify({ level: 'warn', channel: 'operational', ...event }));
+        },
+        resourceMetadataUrl,
+        // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
+        // so every dispatch reaching a tool today has no durable audit record behind it. Stated
+        // here rather than omitted: a composition that skips the field would read as satisfied.
+        auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+      });
 
       return server;
     },
@@ -120,7 +164,11 @@ export function startServer() {
     authorization: {
       validator: tokenValidator,
       revocation: revocationChecker,
+      credentials: upstreamCredentialProvider,
       requestDeadlineMs: config.requestDeadlineMs,
+      // Step 3, straight from the frozen map. The transport carries the grant introspection just
+      // established into this call as the third argument, so no hand-off record is involved.
+      missingScopeFor,
     },
     onError: (error: Error) => {
       // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.

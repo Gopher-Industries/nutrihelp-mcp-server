@@ -1,6 +1,11 @@
 /**
- * Wire form of 401 Bearer and pre-dispatch 403. Scope resolver is injected — no tool-to-scope
- * map exists yet, so the 403 branch is unreachable from production wiring alone.
+ * Wire form of 401 Bearer and pre-dispatch 403.
+ *
+ * Two kinds of case here and the difference matters. The first describe injects a resolver that
+ * answers whatever the case names, so the transport's own behaviour — when it consults the scope
+ * step, what it hands it, what it does with the answer — can be asserted without a map deciding it.
+ * The last describe wires the **production** resolver and the real tool-to-scope map, so the 403
+ * a deployed server actually answers is on the wire rather than described. Ticket 86.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -12,12 +17,16 @@ import {
   type TestKeyPair,
 } from '../../scripts/makeToken.ts';
 import {
+  callTool,
   closeLocalDispatcher,
   listTools,
   mcpRequest,
   startTestServer,
   type TestServer,
 } from '../support/mcpClient.ts';
+import { forgeActiveGrant } from '../support/activeGrant.ts';
+import { missingScopeFor } from '../../src/auth/scopes.ts';
+import type { ActiveGrant } from '../../src/auth/revocation.ts';
 import { installUpstreamMock, type UpstreamMock } from '../support/upstreamMock.ts';
 import {
   expectInsufficientScopeChallenge,
@@ -25,6 +34,8 @@ import {
 } from '../support/assertions.ts';
 import type { RequestRouting } from '../../src/transport/http.ts';
 import {
+  CLIENT_ID,
+  GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   RESOURCE_METADATA_URL,
@@ -329,5 +340,158 @@ describe('the 401 challenge on the wire', () => {
       UNPARSEABLE_HEADERS.length,
       'anti-vacuity: dropping rows from the unparseable-header table must fail this suite, not quieten it'
     ).toBeGreaterThanOrEqual(6);
+  });
+});
+
+/**
+ * The production wiring, end to end: the real tool-to-scope map, the real resolver, and the real
+ * transport. Nothing here names a required scope of its own — the map decides, which is what makes
+ * these cases able to fail when the map changes.
+ *
+ * The grant is forged rather than introspected over the wire (that is `test/security/**`'s job);
+ * what is real is the pairing — the gate reads the grant the checker returned for THIS request, and
+ * the token is signed for the same connection id.
+ */
+describe('the frozen scope map on the wire', () => {
+  let server: TestServer | undefined;
+
+  afterEach(async () => {
+    await server?.close();
+    server = undefined;
+  });
+
+  /**
+   * A server composed as `src/server.ts` composes it: the bare checker, and the frozen map wired
+   * straight in. The grant introspection returns travels to the scope step as the resolver's third
+   * argument — there is no hand-off record between them any more.
+   */
+  async function serverGrantingLive(liveScopes: readonly string[]): Promise<TestServer> {
+    return startTestServer({
+      revocation: {
+        assertGrantActive: (): Promise<ActiveGrant> =>
+          Promise.resolve(
+            forgeActiveGrant({
+              grantId: GRANT_A,
+              scopes: liveScopes,
+              subject: USER_A,
+              clientId: CLIENT_ID,
+            })
+          ),
+      },
+      missingScopeFor,
+      onDispatch: () => {
+        dispatches += 1;
+      },
+    });
+  }
+
+  async function tokenScoped(scopes: readonly string[]): Promise<string> {
+    return makeToken({
+      key: trustedKey,
+      iss: MCP_EXPECTED_ISSUER,
+      aud: MCP_RESOURCE_IDENTIFIER,
+      scopes,
+      sub: USER_A,
+      grantId: GRANT_A,
+    });
+  }
+
+  it('serves a tool call the map covers and both sides grant', async () => {
+    server = await serverGrantingLive([SCOPES.nutritionRead]);
+
+    const response = await callTool(
+      server,
+      'nutrition_lookup',
+      { query: 'oats' },
+      await tokenScoped([SCOPES.nutritionRead])
+    );
+
+    expect(
+      dispatches,
+      'the granting direction, and the one an all-refusing implementation cannot fake'
+    ).toBe(1);
+    expect(response.status).not.toBe(403);
+    expect(response.challenge, 'a served request carries no challenge').toBeUndefined();
+  });
+
+  /**
+   * Asserts only that listing is not refused at the door, because the map gives `tools/list` no
+   * requirement. It deliberately does not claim anything about the catalogue's contents: this
+   * fixture registers no tools. **Scope-FILTERED listing is still ticket 25's**, and it is a
+   * different claim from this one — `ctx.authInfo` is set now, so the filtering is buildable, but
+   * nothing filters yet. Assert the listed names there, not here.
+   */
+  it('does not refuse tools/list for want of a scope, whatever the caller holds', async () => {
+    server = await serverGrantingLive([]);
+
+    const response = await listTools(server, await tokenScoped([]));
+
+    expect(dispatches, 'the request reached the MCP handler').toBe(1);
+    expect(response.status).not.toBe(403);
+  });
+
+  it('refuses a tool the granted scopes do not cover, naming the scope the map requires', async () => {
+    server = await serverGrantingLive([SCOPES.nutritionRead]);
+
+    const response = await callTool(
+      server,
+      'record_meal',
+      {},
+      await tokenScoped([SCOPES.nutritionRead])
+    );
+
+    expectInsufficientScopeChallenge(
+      response,
+      SCOPES.meallogWrite,
+      'a grant that covers nutrition lookups and nothing else, calling the meal-log write'
+    );
+    expect(dispatches, 'and it is refused before the MCP handler is built').toBe(0);
+  });
+
+  /**
+   * The half step 2 exists for, on the wire. The token is signed, unexpired, and says
+   * `meallog:write`; the connection no longer does. Offline validation cannot see that.
+   */
+  it('refuses a signed scope the live grant no longer carries', async () => {
+    server = await serverGrantingLive([SCOPES.nutritionRead]);
+
+    const response = await callTool(
+      server,
+      'record_meal',
+      {},
+      await tokenScoped([SCOPES.nutritionRead, SCOPES.meallogWrite])
+    );
+
+    expectInsufficientScopeChallenge(
+      response,
+      SCOPES.meallogWrite,
+      'a token minted before the user narrowed the connection: the claim still carries the scope and the grant does not'
+    );
+    expect(dispatches).toBe(0);
+  });
+
+  it('refuses when the token names a different connection than the grant that was checked', async () => {
+    server = await serverGrantingLive([SCOPES.meallogWrite]);
+
+    const response = await callTool(
+      server,
+      'record_meal',
+      {},
+      await makeToken({
+        key: trustedKey,
+        iss: MCP_EXPECTED_ISSUER,
+        aud: MCP_RESOURCE_IDENTIFIER,
+        scopes: [SCOPES.meallogWrite],
+        sub: USER_A,
+        grantId: 'grant-b-2222',
+      })
+    );
+
+    expectInsufficientScopeChallenge(
+      response,
+      SCOPES.meallogWrite,
+      'the live answer belongs to another connection, so there is no established grant for this one'
+    );
+    expect(dispatches).toBe(0);
   });
 });

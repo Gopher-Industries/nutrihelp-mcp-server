@@ -9,6 +9,7 @@
 import { createHash, type KeyObject } from 'node:crypto';
 import { McpError, classifyRequestFailure, type RequestFailureKind } from '../errors.ts';
 import { postFormWithoutCredential } from '../upstream/client.ts';
+import { parseScopeList } from './scopes.ts';
 import { CLIENT_ASSERTION_TYPE, clientAssertion, subjectTokenDigest } from './upstreamToken.ts';
 
 /** Log-side endpoint class. Never the path: a path in a log payload is still a path. */
@@ -51,7 +52,7 @@ declare const activeGrantBrand: unique symbol;
  * says a check RAN, not *which token* it ran for: the grant for token B paired with subject token
  * A typechecked, as did one grant held for the whole process. Consumers refuse a mismatch.
  *
- * ⚠️ Still **no freshness claim** — there is no timestamp. What bounds that today is that a grant
+ * Still **no freshness claim** — there is no timestamp. What bounds that today is that a grant
  * is minted per request and discarded with it.
  */
 export interface ActiveGrant {
@@ -173,13 +174,6 @@ function requireHttpsUrl(value: string): string {
     );
   }
   return url.href;
-}
-
-/** RFC 6749 scope is space-delimited. Absent means no scopes, never "all". */
-function readScopes(payload: Record<string, unknown>): readonly string[] {
-  const scope = payload.scope;
-  if (typeof scope !== 'string') return [];
-  return scope.split(' ').filter((entry) => entry !== '');
 }
 
 export function createRevocationChecker(options: RevocationCheckerOptions): RevocationChecker {
@@ -376,7 +370,9 @@ export function createRevocationChecker(options: RevocationCheckerOptions): Revo
     // token it was asked about, so a consumer cannot pair it with a different one.
     return mintActiveGrant({
       ...identity,
-      scopes: readScopes(record),
+      // Through the scope module's rule, not a second copy of it: this one and that one were
+      // byte-identical, and ticket 49's branch already carries a wider split.
+      scopes: parseScopeList(record.scope),
       tokenDigest: subjectTokenDigest(request.token),
     });
   }

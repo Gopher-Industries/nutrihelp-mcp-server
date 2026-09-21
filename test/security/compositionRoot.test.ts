@@ -14,8 +14,35 @@ import { AUTH_SERVER_ORIGIN, INTROSPECTION_PATH, TOKEN_EXCHANGE_PATH } from '../
  */
 const OPT_OUT_SENTINEL = 'transport-tests-only';
 
+/**
+ * How many emitting sinks the deployed root writes: the revocation checker's two channels, the
+ * credential provider's two, the registry's two, and `onError`. A FLOOR rather than an equality —
+ * a seventh channel arriving is not a regression, a sink disappearing is.
+ *
+ * It is here because the two channel pins below match `console.error(` literally. If the root ever
+ * moves to a logger, this goes red and names what happened, instead of leaving those pins to match
+ * nothing in a file that no longer contains the string.
+ */
+const EXPECTED_CONSOLE_SINKS = 7;
+
 function sourceOf(relativePath: string): string {
   return readFileSync(new URL(`../../${relativePath}`, import.meta.url), 'utf8');
+}
+
+/**
+ * The same source with its comments removed.
+ *
+ * Needed because prose in this tree quotes code in order to explain it: the dispatcher's own
+ * comment names `new McpError({...})` twice to say why a refusal must not be written that way, and
+ * a scan counting raw occurrences reported five constructions in a file that has three. Every
+ * other pin in this file is an assertion ABOUT a pattern's presence, where prose only ever makes a
+ * scan stricter; a COUNT is the first one prose can make wrong in the permissive direction.
+ *
+ * Deliberately crude — `//` inside a string literal would over-strip — and sound for the files it
+ * is pointed at, neither of which carries one.
+ */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^([^\n'"`]*?)\/\/.*$/gm, '$1');
 }
 
 /**
@@ -93,7 +120,21 @@ describe('the composition root', () => {
     ).not.toMatch(/\brevocationDisabled\s*:/);
   });
 
-  it('finds both sentinels in the module that declares them', () => {
+  /**
+   * The third sentinel. A root on this one would compose a transport that cannot mint the
+   * exchanged credential, so every credentialed tool fails — but `tools/list` and every public
+   * backing endpoint keep working, which is exactly the shape that reads as healthy.
+   */
+  it('never builds the transport on the credential opt-out', () => {
+    const source = sourceOf('src/server.ts');
+
+    expect(
+      source,
+      'the property assignment, not the bare word: the file names credentials in prose'
+    ).not.toMatch(/\bcredentialsDisabled\s*:/);
+  });
+
+  it('finds all three sentinels in the module that declares them', () => {
     const transport = sourceOf('src/transport/http.ts');
 
     expect(
@@ -108,6 +149,10 @@ describe('the composition root', () => {
       transport,
       'control: and the introspection opt-out likewise. Renaming either field would otherwise leave this file green while asserting the absence of something nothing declares'
     ).toMatch(/\brevocationDisabled\s*:/);
+    expect(
+      transport,
+      'control: and the credential opt-out, added with the third required field. Each absence assertion above is only worth what its declaration control is worth'
+    ).toMatch(/\bcredentialsDisabled\s*:/);
     expect(
       transport.length,
       'control: and the file really was read rather than resolving to an empty string'
@@ -237,6 +282,90 @@ describe('the composition root', () => {
     ).toMatch(/requestDeadlineMs:\s*config\.requestDeadlineMs/);
   });
 
+  /**
+   * Step 3 of the mandatory order, asserted as **supplied** rather than as written.
+   * `missingScopeFor` is optional on the transport, and for the whole of the project's history the
+   * root did not pass it — so the pre-dispatch 403 was built, tested through an injected resolver,
+   * and unreachable from a deployed server. Dropping this line again is a silent regression: every
+   * behavioural suite builds its own app and would stay green.
+   */
+  it('supplies the scope step, so the pre-dispatch 403 is reachable from a deployed root', () => {
+    const source = sourceOf('src/server.ts');
+    const options = transportOptionsIn(source);
+
+    expect(
+      source,
+      'the frozen map itself, imported rather than reimplemented here. The hand-off shim that used to sit between it and the transport is gone: the grant now travels as the resolver third argument'
+    ).toMatch(/import \{ missingScopeFor \} from '\.\/auth\/scopes\.ts';/);
+    expect(
+      options,
+      'and hands the transport the resolver. Absent, the field is simply omitted and every scoped tool call dispatches with no scope check at all'
+    ).toMatch(/missingScopeFor,/);
+    expect(
+      source,
+      'and it must NOT reintroduce the connection-keyed hand-off: that shim was keyed to the connection rather than the request, so two requests overlapping on one connection could take each other answer — and the failure direction was OPEN'
+    ).not.toContain('createScopeGate');
+  });
+
+  /**
+   * Steps 4, 5 and 6's seam. None of these is reachable from a behavioural suite, which builds its
+   * own app — and every one of them is a field whose ABSENCE would look like a smaller diff rather
+   * than a disabled step.
+   */
+  it('wires the credential minter, the dispatch seam and the named audit hole', () => {
+    const source = sourceOf('src/server.ts');
+    const options = transportOptionsIn(source);
+
+    expect(
+      source,
+      'the deployed root builds the production credential provider. Before this it was constructed and exported so the binding would not be an unused local, and nothing dispatched through it'
+    ).toContain('createUpstreamCredentialProvider(');
+    expect(
+      options,
+      'and hands it to the transport as a value. The only object literal that field accepts is the opt-out, so a binding here is the granting half'
+    ).toMatch(/credentials:\s*[A-Za-z_$]/);
+    expect(
+      options,
+      'the registry is given the per-app authorization lookup, which is the ONLY way dispatch can read what the request established. Omit it and every tool refuses'
+    ).toMatch(/\bauthorizationFor,/);
+    expect(
+      options,
+      'step 5 is NAMED, and what it names does nothing: src/audit/logger.ts has never been written, so a dispatch reaching a tool has no durable audit record behind it. The audit rule calls that a bypass rather than a fallback, and this pin is what keeps the gap visible in a gate instead of in a comment. Ticket 34 replaces the value'
+    ).toMatch(/auditEnqueue:\s*AUDIT_ENQUEUE_NOT_IMPLEMENTED/);
+    expect(
+      options,
+      'and the registry is given a REAL security channel. A refusal at the dispatcher is thrown into the SDK, which never calls toLog() — so without this the identifiers an operator needs are constructed and discarded, and the transport cheaper denials are the only denials anybody can see. MATCHED THROUGH TO THE EMITTING CALL, not to the shape of a function: a pin that stopped at the arrow was satisfied by `logSecurity: () => undefined`, and a root wired that way was measured green through compositionRoot, test:controls and the whole unit layer. Scoped to the transport arguments: the revocation checker and the credential provider each take a field of this name above, and a whole-file match would be satisfied by either'
+    ).toMatch(/logSecurity:\s*\([^)]*\)\s*=>\s*\{\s*console\.error\(/);
+    expect(
+      options,
+      'and its OPERATIONAL twin, emitting for real on the same terms. Without it the registry has one channel, and a spent request budget — ordinary backend slowness, asked about on every outbound call — is filed as a denial and buries the records that carry a user, a client and a grant'
+    ).toMatch(/logOperational:\s*\([^)]*\)\s*=>\s*\{\s*console\.error\(/);
+    expect(
+      (withoutComments(source).match(/console\.error\(/g) ?? []).length,
+      'control for both pins above: the root really reports through console.error, in that shape, this many times. A root that moved to a logger would leave those two regexes matching nothing in a file that no longer carries the string — this is what goes red first and says so. Counted over code rather than raw source: a count is the one assertion shape a comment can satisfy in the permissive direction'
+    ).toBeGreaterThanOrEqual(EXPECTED_CONSOLE_SINKS);
+  });
+
+  /**
+   * The one field on `RegistryConfig` the deployed root must NOT pass. It exists only so a suite
+   * can inject a credentialed descriptor — no shipped tool has a credentialed backing endpoint, so
+   * without it every assertion about step 4 is vacuous. In the production registry it would
+   * register unreviewed tools on the one dispatch path, behind a one-line diff that reads smaller
+   * than the three sentinels above.
+   */
+  it('passes no extra tools into the production registry', () => {
+    const options = transportOptionsIn(sourceOf('src/server.ts'));
+
+    expect(
+      options,
+      'the property assignment: a deployed root naming this field has put a tool nobody reviewed behind the trust boundary'
+    ).not.toMatch(/\bextraTools\s*:/);
+    expect(
+      sourceOf('src/tools/registry.ts'),
+      'control: the registry really declares that field, so the absence above is a property of the composition root rather than of a name nothing uses'
+    ).toMatch(/\bextraTools\?:/);
+  });
+
   it('does wire a validator and a metadata pointer into the endpoint it builds', () => {
     const source = sourceOf('src/server.ts');
 
@@ -265,5 +394,71 @@ describe('the composition root', () => {
       source,
       'and the authorization server comes from its own config value. A root passing a literal, or passing config.expectedIssuer by adjacency, would satisfy every other assertion here — and those two values being confusable is exactly what the open question about them is about'
     ).toMatch(/authorizationServers:\s*\[config\.authServerUrl\]/);
+  });
+});
+
+/**
+ * Source scan of `src/tools/registry.ts`, in this file because `test:controls` chains it and
+ * `validate` chains that — the claim below has to be checked on every pre-push or it is a comment.
+ */
+describe('the dispatcher reports every refusal it raises', () => {
+  /**
+   * `refuse` and `reportOperational` construct, report and hand back in one statement, and the
+   * comment above them used to say that this "stops a new refusal path being added with a log
+   * payload nobody reads". It did not: `throw new McpError({...})` written directly in that file
+   * typechecks, lints and dispatches identically, and the SDK never calls `toLog()` — so the
+   * identifiers an operator needs would be built and discarded, silently, by a path that looks
+   * like every other one.
+   *
+   * Tickets 25, 30, 31, 32 and 48 each add a refusal path here. This is what makes the convention
+   * a gate: every construction in that file must sit inside one of the two reporting calls.
+   */
+  it('constructs no taxonomy error outside a reporting call', () => {
+    const registry = withoutComments(sourceOf('src/tools/registry.ts'));
+    const constructed = registry.match(/new McpError\(/g) ?? [];
+    const reported =
+      registry.match(/\b(?:refuse|reportOperational)\(\s*config,\s*new McpError\(/g) ?? [];
+
+    expect(
+      constructed.length,
+      'control: the dispatcher really does raise taxonomy errors, so the equality below is about where they are constructed rather than about a file that constructs none'
+    ).toBeGreaterThan(0);
+    expect(
+      reported.length,
+      'control: and at least one of them goes through a reporting call, so a pattern that matched nothing cannot satisfy this by making both counts zero'
+    ).toBeGreaterThan(0);
+    expect(
+      reported.length,
+      'every one of them. A refusal raised outside refuse() or reportOperational() is a denial at the trust boundary that nothing records — which is the failure this seam was built to close, arriving through the door marked "one more refusal path"'
+    ).toBe(constructed.length);
+  });
+
+  /**
+   * **AND THE COMPANION THAT MAKES THE NARROWING SOUND.** Each channel takes a slice of
+   * `McpErrorLogPayload`, not the whole union — the `confirmation_required` variant carries a
+   * `confirmation_token`, and the sink on the far end serialises whatever it is handed. The two
+   * reporting helpers narrow `toLog()` to their slice by assertion rather than by a runtime arm,
+   * because an arm this pin makes unreachable is an untestable branch whose only behaviour is to
+   * drop a record.
+   *
+   * So the assertion is only true while these three classes are the only ones raised there. A
+   * fourth — ticket 48's write tool is the obvious candidate — turns this red, which is the moment
+   * to give it a channel rather than to widen a port.
+   */
+  it('raises only the three classes its two channels are typed for', () => {
+    const registry = withoutComments(sourceOf('src/tools/registry.ts'));
+    const named = [...registry.matchAll(/new McpError\(\{\s*class:\s*'([^']+)'/g)].map(
+      (match) => match[1] ?? ''
+    );
+
+    expect(
+      named.length,
+      'control: the classes really are read off the constructions, so the set below is not an empty set matching an empty expectation'
+    ).toBeGreaterThan(0);
+    expect([...new Set(named)].sort()).toEqual([
+      'insufficient_scope',
+      'unauthorized',
+      'upstream_failure',
+    ]);
   });
 });
