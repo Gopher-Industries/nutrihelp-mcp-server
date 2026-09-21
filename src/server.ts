@@ -56,21 +56,10 @@ export function startServer() {
    */
   const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
 
-const tokenValidator = createTokenValidator({
-    jwksUrl: config.jwksUrl,
-    expectedIssuer: config.expectedIssuer,
-    expectedAudience: config.resourceIdentifier,
-    cacheMaxAgeMs: config.jwksCacheMaxAgeMs,
-    requestDeadlineMs: config.requestDeadlineMs,
-    // Unset on purpose: key-set fetches use the default egress adapter.
-  });
+const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
 
-  /**
-   * Joined rather than configured: the host is configured and the path is fixed by the contract, so
-   * a seventeenth variable would let the two drift for a value neither side may choose alone.
-   */
-  const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
-
+  /** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
+  const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
   /** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
   const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
 
