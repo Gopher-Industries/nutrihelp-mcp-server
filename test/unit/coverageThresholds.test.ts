@@ -76,7 +76,7 @@ import config from '../../vitest.config.ts';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /** The directories the coverage policy puts a branch floor on. Nothing else carries one. */
-const GATED_DIRS = ['src/auth', 'src/tools'] as const;
+const GATED_DIRS = ['src/auth', 'src/consent', 'src/tools'] as const;
 
 /**
  * Every key of `thresholds` is a glob except these: the four metric names carry the global values

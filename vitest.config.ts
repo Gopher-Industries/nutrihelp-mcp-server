@@ -6,12 +6,8 @@ export default defineConfig({
     // `conformance` and `security` as separately named globs.
     include: ['test/**/*.test.ts'],
 
-    // `passWithNoTests` is deliberately NOT set here. Globally it made `npm test` and
-    // `npm run conformance` exit 0 over globs with no files, so `validate` and the pre-push hook
-    // asserted nothing — the same fiction as the estate's `|| exit 0`. It now lives on the
-    // individual npm script for the one layer that still has no suite, `test:integration`, which
-    // cannot run anywhere until a reachable backend and a seeded account exist. Every other
-    // layer exits 1 on an empty glob, verified by running rather than by reading.
+    // Every test layer now has a suite; an empty glob must fail. Redis integration tests
+    // explicitly report a skip only when their connection URL is absent. CI supplies Redis.
 
     coverage: {
       provider: 'v8',
@@ -24,6 +20,7 @@ export default defineConfig({
       // suite; wiring guards live in test/unit/coverageThresholds.test.ts.
       thresholds: {
         'src/auth/**': { branches: 90 },
+        'src/consent/**': { branches: 90 },
         'src/tools/**': { branches: 90 },
       },
     },
