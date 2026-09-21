@@ -4,9 +4,9 @@ import {
   createConfirmationStore,
   type ConfirmationAction,
   type ConfirmationStoreOptions,
-} from '../../../src/auth/confirmationStore.ts';
-import { canonicalJson, sha256 } from '../../../src/auth/confirmationArguments.ts';
-import type { KeyValueConnection } from '../../../src/upstream/client.ts';
+} from '../../../src/consent/confirmation.ts';
+import { canonicalJson, sha256 } from '../../../src/consent/confirmation.ts';
+import type { ConfirmationStorage } from '../../../src/consent/confirmation.ts';
 
 const action: ConfirmationAction = {
   binding: {
@@ -22,7 +22,7 @@ const record = { id: '9007199254740993', status: 'saved' };
 
 function setup() {
   // Reply fixtures exercise the TS protocol. Real Lua state transitions are tested against Redis.
-  const evaluate = vi.fn<KeyValueConnection['eval']>();
+  const evaluate = vi.fn<ConfirmationStorage['eval']>();
   return { evaluate, store: createConfirmationStore({ eval: evaluate }) };
 }
 

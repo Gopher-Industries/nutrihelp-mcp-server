@@ -5,7 +5,7 @@ vi.mock('@redis/client', () => ({ createClient: mocks.createClient }));
 
 import { McpError } from '../../../src/errors.ts';
 import { connectKeyValue } from '../../../src/upstream/client.ts';
-import { connectConfirmationStore } from '../../../src/auth/confirmationStore.ts';
+import { connectConfirmationStore } from '../../../src/server.ts';
 
 function fakeClient() {
   return {

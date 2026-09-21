@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canonicalJson, sha256 } from '../../../src/auth/confirmationArguments.ts';
+import { canonicalJson, sha256 } from '../../../src/consent/confirmation.ts';
 
 describe('confirmation argument hashes', () => {
   it('ignores object key order recursively, including numeric-looking keys', () => {

@@ -1,13 +1,157 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { McpError, ConfirmationError } from '../errors.ts';
 export { ConfirmationError } from '../errors.ts';
-import { connectKeyValue, type KeyValueConnection } from '../upstream/client.ts';
-import { canonicalJson, sha256, type JsonValue } from './confirmationArguments.ts';
-import {
-  ISSUE_CONFIRMATION,
-  CLAIM_CONFIRMATION,
-  COMPLETE_CONFIRMATION,
-} from './confirmationScripts.ts';
+
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+const MAX_DEPTH = 32;
+const MAX_VALUES = 4096;
+
+/** JSON object key order is immaterial; array order, types, and string bytes are preserved. */
+export function canonicalJson(value: unknown, maxBytes = 16_384): string {
+  let remaining = MAX_VALUES;
+
+  function encode(item: unknown, depth: number): string {
+    if (depth > MAX_DEPTH || --remaining < 0) throw new TypeError('Confirmation JSON is too large');
+    if (item === null) return 'null';
+    if (typeof item !== 'object') return encodeScalar(item, maxBytes);
+    if (Array.isArray(item)) return encodeArray(item, depth);
+    return encodeObject(item, depth);
+  }
+
+  function encodeArray(items: unknown[], depth: number): string {
+    if (Reflect.ownKeys(items).length !== items.length + 1) {
+      throw new TypeError('Confirmation arguments must be JSON');
+    }
+    return (
+      '[' +
+      Array.from({ length: items.length }, (_, i) =>
+        encode(dataProperty(items, String(i)), depth + 1)
+      ).join(',') +
+      ']'
+    );
+  }
+
+  function encodeObject(item: object, depth: number): string {
+    const prototype: unknown = Object.getPrototypeOf(item);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('Confirmation arguments must be JSON');
+    }
+    const keys = Reflect.ownKeys(item);
+    if (keys.some((key) => typeof key !== 'string')) {
+      throw new TypeError('Confirmation arguments must be JSON');
+    }
+    return (
+      '{' +
+      (keys as string[])
+        .sort()
+        .map((key) => JSON.stringify(key) + ':' + encode(dataProperty(item, key), depth + 1))
+        .join(',') +
+      '}'
+    );
+  }
+
+  const encoded = encode(value, 0);
+  if (Buffer.byteLength(encoded, 'utf8') > maxBytes) {
+    throw new TypeError('Confirmation JSON is too large');
+  }
+  return encoded;
+}
+
+function dataProperty(item: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(item, key);
+  if (descriptor?.enumerable !== true || !('value' in descriptor)) {
+    throw new TypeError('Confirmation arguments must be JSON');
+  }
+  return descriptor.value as unknown;
+}
+
+function encodeScalar(item: unknown, maxBytes: number): string {
+  if (typeof item === 'boolean') return JSON.stringify(item);
+  if (typeof item === 'string' && Buffer.byteLength(item, 'utf8') <= maxBytes) {
+    return JSON.stringify(item);
+  }
+  if (typeof item === 'number' && Number.isFinite(item)) return JSON.stringify(item);
+  throw new TypeError('Confirmation arguments must be finite JSON values');
+}
+
+export function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+// One Redis key per confirmation. TIME and state transitions run together on the server.
+const NOW = `
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+`;
+
+export const ISSUE_CONFIRMATION =
+  NOW +
+  `
+local expires = now + tonumber(ARGV[3])
+local record = cjson.encode({
+  binding_hash = ARGV[1], arguments_hash = ARGV[2],
+  state = 'pending', expires_at = expires
+})
+local inserted = redis.call('SET', KEYS[1], record, 'NX', 'PX', ARGV[3])
+if not inserted then return {'collision'} end
+return {'issued', tostring(expires)}
+`;
+
+export const CLAIM_CONFIRMATION =
+  NOW +
+  `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'invalid'} end
+local record = cjson.decode(raw)
+if record.binding_hash ~= ARGV[1] or record.arguments_hash ~= ARGV[2] then
+  return {'mismatch'}
+end
+if record.state == 'done' then return {'done', record.result} end
+if record.state == 'in_progress' and record.lease_until > now then
+  return {'in_progress', tostring(record.lease_until - now)}
+end
+if record.expires_at <= now then return {'invalid'} end
+if record.state ~= 'pending' and record.state ~= 'in_progress' then return {'invalid'} end
+record.state = 'in_progress'
+record.owner = ARGV[3]
+record.lease_until = now + tonumber(ARGV[4])
+redis.call('SET', KEYS[1], cjson.encode(record), 'PX',
+  math.max(record.expires_at - now, tonumber(ARGV[5])))
+return {'claimed'}
+`;
+
+export const COMPLETE_CONFIRMATION = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'lost'} end
+local record = cjson.decode(raw)
+if record.binding_hash ~= ARGV[1] or record.arguments_hash ~= ARGV[2]
+  or record.state ~= 'in_progress' or record.owner ~= ARGV[3] then
+  return {'lost'}
+end
+record.state = 'done'
+record.result = ARGV[4]
+record.owner = nil
+record.lease_until = nil
+redis.call('SET', KEYS[1], cjson.encode(record), 'PX', ARGV[5])
+return {'completed'}
+`;
+
+/** The composition root supplies the command port; this module owns no connection. */
+export interface ConfirmationStorage {
+  readonly eval: (
+    script: string,
+    keys: string[],
+    args: string[],
+    timeoutMs: number
+  ) => Promise<unknown>;
+}
 
 export interface ConfirmationBinding {
   /** All identity fields come from verified auth / live grant data, never tool arguments. */
@@ -105,7 +249,7 @@ function readSnapshot(action: ConfirmationAction) {
 
 /** Redis-backed only: there is no process-local fallback when recording fails. */
 export function createConfirmationStore(
-  storage: Pick<KeyValueConnection, 'eval'>,
+  storage: ConfirmationStorage,
   options: ConfirmationStoreOptions = {}
 ) {
   const lifetimeMs = duration(options.lifetimeMs ?? 300_000, 900_000);
@@ -266,22 +410,3 @@ async function runWriter(
 }
 
 export type ConfirmationStore = ReturnType<typeof createConfirmationStore>;
-
-/** Ticket 49's composition hook. url is trusted Render Key Value configuration, not model input. */
-export async function connectConfirmationStore(
-  url: string,
-  options: ConfirmationStoreOptions = {}
-) {
-  let connection: KeyValueConnection;
-  try {
-    connection = await connectKeyValue(url, options.commandTimeoutMs ?? 1_000);
-  } catch {
-    throw new ConfirmationError('confirmation_store_unavailable');
-  }
-  try {
-    return { ...createConfirmationStore(connection, options), close: connection.close };
-  } catch (error) {
-    connection.close();
-    throw error;
-  }
-}

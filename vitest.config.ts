@@ -20,6 +20,7 @@ export default defineConfig({
       // suite; wiring guards live in test/unit/coverageThresholds.test.ts.
       thresholds: {
         'src/auth/**': { branches: 90 },
+        'src/consent/**': { branches: 90 },
         'src/tools/**': { branches: 90 },
       },
     },

@@ -1,16 +1,16 @@
 import { createServer, connect, type Socket } from 'node:net';
-import { CLAIM_CONFIRMATION } from '../../src/auth/confirmationScripts.ts';
+import { CLAIM_CONFIRMATION } from '../../src/consent/confirmation.ts';
+import { connectConfirmationStore } from '../../src/server.ts';
 import { createClient } from '@redis/client';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { connectKeyValue, type KeyValueConnection } from '../../src/upstream/client.ts';
 import {
-  connectConfirmationStore,
   createConfirmationStore,
   type ConfirmationAction,
   type ConfirmationStore,
   type ConfirmedWrite,
-} from '../../src/auth/confirmationStore.ts';
-import { sha256, type JsonValue } from '../../src/auth/confirmationArguments.ts';
+} from '../../src/consent/confirmation.ts';
+import { sha256, type JsonValue } from '../../src/consent/confirmation.ts';
 
 const action: ConfirmationAction = {
   binding: {
