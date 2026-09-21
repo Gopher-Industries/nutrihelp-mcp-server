@@ -56,10 +56,6 @@ export function startServer() {
    */
   const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
 
-const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
-
-  /** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
-  const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
   /** Derived once: the challenge pointer, the served document and the registry's refusals agree. */
   const resourceMetadataUrl = protectedResourceMetadataUrl(config.resourceIdentifier);
 
@@ -67,7 +63,7 @@ const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).
     introspectionUrl,
     clientId: config.clientId,
     clientAssertionKey: config.clientAssertionKey,
-    resourceMetadataUrl,
+    resourceMetadataUrl: protectedResourceMetadataUrl(config.resourceIdentifier),
     negativeCacheMaxAgeMs: config.revokedGrantCacheMaxAgeMs,
     now: () => Date.now(),
     // Operational vs security: shared sink today, separated by `channel`.
