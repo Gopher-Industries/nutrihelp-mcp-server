@@ -4,7 +4,9 @@
  * The byte ceiling is 32 KiB and truncation sets `truncated` + `truncation_note`. Both were
  * unspecified when this suite was written, so neither is asserted here yet.
  *
- * WILL PASS WHEN: ticket 29 lands `src/shape/bound.ts` and ticket 32 lands `get_meal_plan`.
+ * INTENTIONALLY RED until `src/shape/bound.ts` exists and a `get_meal_plan` tool that uses it is
+ * registered, with this suite starting its server with `registerRealTools`. Do not skip or delete:
+ * it goes green when that tool lands.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

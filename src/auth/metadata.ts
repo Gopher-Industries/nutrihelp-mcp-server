@@ -20,7 +20,10 @@ export interface ProtectedResourceMetadata {
 
 const BEARER_METHODS_SUPPORTED = ['header'] as const;
 
-/** `scopes_supported` omitted until the tool-to-scope map exists. */
+/**
+ * `scopes_supported` is optional and not published yet. The tool-to-scope map in `scopes.ts` now
+ * exists, so publishing it from that map is open work; a unit test pins the absence until then.
+ */
 export function protectedResourceMetadata(
   options: ProtectedResourceMetadataOptions
 ): ProtectedResourceMetadata {

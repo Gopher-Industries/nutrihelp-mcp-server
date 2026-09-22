@@ -7,7 +7,12 @@ logic.
 
 ## Status
 
-Early. The transport is real and the rest is not yet built.
+Built on `main` and not deployed anywhere. The request path is in place end to end: offline
+token validation against published JWKS, live grant introspection on every request, the
+tool-to-scope map, RFC 8693 token exchange with an in-process upstream credential cache, one
+tool (`nutrition_lookup`), and the Redis-backed confirmation store that write tools will use.
+**Audit is a placeholder that records nothing**: tool calls are dispatched without a durable
+audit record, and the server says so in a warning at startup.
 
 | Area                                | State                                                                                                                                                |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -690,6 +695,9 @@ npm run validate         # check:node + typecheck + lint + format:check + test +
                          #   + test:controls + security:audit
 ```
 
+`test/unit/readmeRecipe.test.ts` loads this README and checks the local-development recipe
+against the real config loader, so editing that recipe can fail `npm test`.
+
 `validate` is what the husky `pre-push` hook runs. It is not full CI parity and does not claim to
 be: coverage, secret scanning, `test:security` and `test:integration` are not chained into it.
 Run `npm run coverage` before opening a pull request that touches the auth, consent or tool directories,
@@ -794,9 +802,8 @@ upstream client. `connectConfirmationStore` in `src/server.ts` opens the connect
 and passes it to `createConfirmationStore`. Redis scripts are the authority for
 claims and completion; no local fallback is used.
 
-After rebasing onto main, run `npm ci` to install the locked dependencies, including
-`@redis/client`, before typechecking. Importing the composition root for connection
-tests does not start the HTTP server; `npm run dev` and `npm start` still do.
+Importing the composition root for connection tests does not start the HTTP server;
+`npm run dev` and `npm start` still do.
 
 ### Caller contract
 
@@ -835,14 +842,14 @@ With Node 24 and Docker, from the repository directory (PowerShell):
 
 ```powershell
 npm.cmd ci
-docker run --detach --rm --name nutrihelp-ticket48-redis -p 127.0.0.1:16380:6379 redis:7-alpine
-docker exec nutrihelp-ticket48-redis redis-cli ping
+docker run --detach --rm --name nutrihelp-confirmation-redis -p 127.0.0.1:16380:6379 redis:7-alpine
+docker exec nutrihelp-confirmation-redis redis-cli ping
 $env:MCP_CONFIRMATION_TEST_REDIS_URL = "redis://127.0.0.1:16380"
 npm.cmd run validate
 npm.cmd run test:integration
 npm.cmd run test:security
 npm.cmd run coverage
-docker stop nutrihelp-ticket48-redis
+docker stop nutrihelp-confirmation-redis
 Remove-Item Env:MCP_CONFIRMATION_TEST_REDIS_URL
 ```
 
