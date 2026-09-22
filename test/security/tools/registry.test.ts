@@ -1,12 +1,11 @@
 /**
  * Security suite: cross-user access through the dispatcher. Ticket 33 case 6.
  *
- * WILL PASS WHEN: dispatch lands in `src/tools/registry.ts` (ticket 25 covers listing only),
- * ticket 32 lands `get_meal_plan`, and ticket 28 lands the credentialed path in
- * `src/upstream/client.ts`. Also needs the backend's `GET /api/mealplan/me` (WS2).
+ * INTENTIONALLY RED until a `get_meal_plan` tool is registered in `src/tools/registry.ts` and this
+ * suite starts its server with `registerRealTools`. Do not skip or delete: it goes green when that
+ * tool lands and calls `GET /api/mealplan/me` with the exchanged credential.
  *
- * Introspection is stubbed active — ticket 59 owns it, and the revocation suite is where its
- * absence goes red.
+ * Introspection is stubbed active here; the revocation suite is where an inactive grant goes red.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

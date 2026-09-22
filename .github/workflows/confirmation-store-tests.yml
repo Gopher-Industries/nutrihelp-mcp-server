@@ -1,8 +1,8 @@
-name: Confirmation store
+name: CI
 on:
   pull_request:
   push:
-    branches: [main, feature/ticket-48-confirmation-store]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

@@ -5,8 +5,9 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * WILL PASS WHEN: ticket 28 lands query/body assembly in `src/upstream/client.ts` with the
- * frozen deny-list, and tickets 26 and 32 land the two tools that drive it.
+ * INTENTIONALLY RED until a `get_meal_plan` tool is registered on the server this suite starts:
+ * `nutrition_lookup` passes, and the `get_meal_plan` leg finds no request on the wire. Do not skip
+ * or delete: it goes green when that tool lands.
  */
 
 import { existsSync } from 'node:fs';
@@ -23,6 +24,7 @@ import {
   installUpstreamMock,
   wireCallText,
   type UpstreamMock,
+  type WireCall,
 } from '../../support/upstreamMock.ts';
 import { expectWireCallsSince } from '../../support/assertions.ts';
 import {
@@ -39,6 +41,46 @@ import {
   USER_B,
 } from '../../support/testEnv.ts';
 import { contract, handler, inputSchema } from '../../../src/tools/nutritionLookup.ts';
+
+/** Same normalisation the deny-list matches with: `USER_ID`, `user-id` and `userId` are one name. */
+function normalizeName(name: string): string {
+  return name.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function collectJsonKeys(value: unknown, into: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonKeys(item, into);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value)) {
+      into.add(normalizeName(key));
+      collectJsonKeys(nested, into);
+    }
+  }
+}
+
+/**
+ * Every name a field could travel under: query keys, header names and body keys, normalised.
+ * Names are compared whole, because a substring search over the wire text matches `user`
+ * inside the `user-agent` header the runtime adds to every request.
+ */
+function wireFieldNames(call: WireCall): string[] {
+  const names = new Set<string>();
+  for (const key of Object.keys(call.searchParams)) names.add(normalizeName(key));
+  for (const key of Object.keys(call.headers)) names.add(normalizeName(key));
+  if (call.body !== '') {
+    try {
+      collectJsonKeys(JSON.parse(call.body), names);
+    } catch {
+      for (const key of new URLSearchParams(call.body).keys()) names.add(normalizeName(key));
+    }
+  }
+  return [...names];
+}
+
+/** URL, header values and body as one searchable string; header names are left out. */
+function wireTextWithoutHeaderNames(call: WireCall): string {
+  return [call.fullUrl, ...Object.values(call.headers).map(String), call.body].join('\n');
+}
 
 /** Distinctive values, so a leak is unambiguous rather than a coincidental substring. */
 const SMUGGLED_VALUE = 'SMUGGLED-USER-B-c0ffee';
@@ -72,7 +114,7 @@ beforeEach(async () => {
     grant_id: GRANT_A,
   });
   upstream.exchange({
-    access_token: 'exchanged-credential-for-user-a',
+    access_token: 'exchanged-credential-for-a',
     issued_token_type: 'urn:ietf:params:oauth:token-type:jwt',
     token_type: 'Bearer',
     expires_in: 120,
@@ -176,6 +218,28 @@ describe('a user identifier smuggled into tool arguments', () => {
    * from looking like a tool that filtered.
    */
   it('never puts a deny-listed identity field on the wire', async () => {
+    // The name check must fire on a real key and stay quiet on a header that merely contains one.
+    const synthetic: WireCall = {
+      method: 'POST',
+      origin: NUTRIHELP_API_ORIGIN,
+      path: FOODDATA_SEARCH_PATH,
+      fullUrl: `${NUTRIHELP_API_ORIGIN}${FOODDATA_SEARCH_PATH}?user=x`,
+      searchParams: { user: 'x' },
+      headers: { 'user-agent': 'node' },
+      body: JSON.stringify({ nested: { target_email: 'x' } }),
+    };
+    expect(wireFieldNames(synthetic)).toContain(normalizeName('user'));
+    expect(wireFieldNames(synthetic)).toContain(normalizeName('target_email'));
+    expect(wireFieldNames({ ...synthetic, searchParams: {}, body: '' })).not.toContain(
+      normalizeName('user')
+    );
+    expect(
+      wireTextWithoutHeaderNames({ ...synthetic, fullUrl: '', searchParams: {}, body: '' })
+    ).not.toContain('user');
+    expect(
+      wireTextWithoutHeaderNames({ ...synthetic, body: '{"p":"{\\"user_id\\":1}"}' })
+    ).toContain('user_id');
+
     for (const { tool, args, backingPath } of DRIVEN_TOOLS) {
       for (const field of IDENTITY_DENY_LIST) {
         const value = field.toLowerCase().includes('email') ? SMUGGLED_EMAIL : SMUGGLED_VALUE;
@@ -192,14 +256,20 @@ describe('a user identifier smuggled into tool arguments', () => {
         );
 
         for (const call of calls) {
-          const wire = wireCallText(call);
           expect(
-            wire,
+            wireCallText(call),
             `case 7: the value of "${field}" reached the wire on ${tool}: ${call.fullUrl}`
           ).not.toContain(value);
           expect(
-            wire,
+            wireFieldNames(call),
             `case 7: the field name "${field}" reached the wire on ${tool}: ${call.fullUrl}`
+          ).not.toContain(normalizeName(field));
+          // The whole-name check misses a name inside a path, a bracketed or compound key, a
+          // header value or a nested JSON string; a substring search catches those, and leaves
+          // out only header names, where `user-agent` would match `user`.
+          expect(
+            wireTextWithoutHeaderNames(call),
+            `case 7: the field name "${field}" appears in the URL, a header value or the body on ${tool}: ${call.fullUrl}`
           ).not.toContain(field);
         }
       }

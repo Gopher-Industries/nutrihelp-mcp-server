@@ -95,7 +95,8 @@ export interface AuditEnqueueEvent {
  * the plan's module list and has never been written, and the audit rule is explicit that a path
  * skipping the durable enqueue is **a bypass, not a fallback**. The step is therefore declared,
  * called in order, and fulfilled today by `AUDIT_ENQUEUE_NOT_IMPLEMENTED` — a composition that
- * states the gap rather than omitting the step. Ticket 34 replaces it; nothing else moves.
+ * states the gap rather than omitting the step. A real audit implementation replaces it; nothing
+ * else moves.
  *
  * **It returns a promise because the step has to be able to FAIL, and the call site awaits it.**
  * A durable enqueue is either a delivery to authenticated ingest or a write to the shared store,
@@ -106,7 +107,9 @@ export interface AuditEnqueueEvent {
 export type AuditEnqueue = (event: AuditEnqueueEvent) => Promise<void>;
 
 /**
- * The placeholder described above, supplied by the composition root today. Pinned by name in
+ * The placeholder described above, supplied by the composition root today. **It resolves
+ * immediately and records nothing**, so dispatch proceeds with no audit record at all; the root
+ * warns at startup while it is wired. Pinned by name in
  * `test/security/compositionRoot.test.ts`, so the day it leaves the root a gate notices.
  */
 export const AUDIT_ENQUEUE_NOT_IMPLEMENTED: AuditEnqueue = () => Promise.resolve();

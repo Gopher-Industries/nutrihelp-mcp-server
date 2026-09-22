@@ -11,10 +11,7 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
-.claude/
-docs/
-CLAUDE.md
-TMP_*
-.superpowers/
+# Scratch directories the issuer test suite creates in-tree.
+test/TMP_*/
 # A pattern, not one dated name: the next backup would otherwise be untracked.
 .env.backup*

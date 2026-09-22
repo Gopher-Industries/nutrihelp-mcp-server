@@ -18,7 +18,10 @@ import { connectKeyValue, type KeyValueConnection } from './upstream/client.ts';
 import { ConfirmationError } from './errors.ts';
 import { createConfirmationStore, type ConfirmationStoreOptions } from './consent/confirmation.ts';
 
-/** Ticket 49's composition hook. url is trusted Render Key Value configuration, not model input. */
+/**
+ * Opens the confirmation store for a write tool to use; nothing composes it yet. url is trusted
+ * Render Key Value configuration, not model input.
+ */
 export async function connectConfirmationStore(
   url: string,
   options: ConfirmationStoreOptions = {}
@@ -52,7 +55,7 @@ export function startServer() {
 
   /**
    * Joined rather than configured: the host is configured and the path is fixed by the contract, so
-   * a seventeenth variable would let the two drift for a value neither side may choose alone.
+   * a separate variable would let the two drift for a value neither side may choose alone.
    */
   const introspectionUrl = new URL('/api/oauth/introspect', config.authServerUrl).href;
 
@@ -160,6 +163,14 @@ export function startServer() {
       console.error(JSON.stringify({ level: 'error', msg: error.message }));
     },
   });
+  // Said once at startup, loudly, because the placeholder wired as `auditEnqueue` above resolves
+  // without recording anything and nothing else in a running process would reveal that.
+  console.warn(
+    JSON.stringify({
+      level: 'warn',
+      msg: 'audit enqueue is a placeholder: tool calls are dispatched WITHOUT a durable audit record. Do not deploy this build.',
+    })
+  );
   const listener = app.listen(config.port, () => {
     console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
   });

@@ -5,8 +5,9 @@
  * the original result and writes nothing. Case 8 asserts the invariant both hold — exactly one
  * write reaches the backend.
  *
- * WILL PASS WHEN: ticket 48 lands the confirmation store and ticket 49 lands `record_meal`. It
- * also needs the backend meal-log write (tickets 46 and 47), which is WS2's work.
+ * INTENTIONALLY RED, both cases, until a `record_meal` tool backed by `src/consent/confirmation.ts`
+ * is registered and this suite starts its server with `registerRealTools`. Do not skip or delete:
+ * they go green when `record_meal` lands.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

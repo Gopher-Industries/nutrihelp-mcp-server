@@ -68,10 +68,10 @@ describe('the protected resource metadata document', () => {
     ).toStrictEqual([...PERMITTED_KEYS].sort());
   });
 
-  it('does not advertise scopes while no scope is enforced', () => {
+  it('does not advertise scopes_supported yet', () => {
     expect(
       Object.keys(document()),
-      'scopes_supported is optional, and a scope list nothing checks is a claim the code cannot back. It arms with the tool-to-scope map'
+      'scopes_supported is optional and not published yet. Publishing it from the tool-to-scope map is open work; change this test in the same change'
     ).not.toContain('scopes_supported');
   });
 

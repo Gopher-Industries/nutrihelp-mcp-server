@@ -70,9 +70,9 @@ function isAboutTheToken(cause: unknown): boolean {
 
 /**
  * Default fetch: the one module allowed to call out.
- * Spends the whole request budget because JWKS is currently the only stage. Do not copy this
- * for introspection/exchange/audit — split remaining time instead. Do not forward jose's
- * AbortSignal: that reinstates its 5s default.
+ * May spend the whole request budget because offline validation is the first stage; the
+ * transport hands every later stage only what remains. Do not forward jose's AbortSignal: that
+ * reinstates its 5s default.
  */
 function keySetFetchThroughTheOneDoor(deadlineMs: number): KeySetFetch {
   return async (url, requested) =>
@@ -81,7 +81,8 @@ function keySetFetchThroughTheOneDoor(deadlineMs: number): KeySetFetch {
       headers: requested.headers,
       redirect: requested.redirect,
       deadlineMs,
-      // Transport does not thread a correlation id yet; the door mints one that does not join.
+      // This validator is not handed the request's correlation id, so the door mints one that
+      // does not join the request's other records.
       correlationId: undefined,
     });
 }

@@ -47,7 +47,8 @@
     "@redis/client": "6.2.1",
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
-    "jose": "^6.2.8"
+    "jose": "^6.2.8",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

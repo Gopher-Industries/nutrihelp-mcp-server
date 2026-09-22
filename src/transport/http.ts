@@ -37,13 +37,11 @@ export interface RequestRouting {
 /**
  * Scope this request needs and the grant does not carry, or `undefined` if it suffices.
  * Must be one of this server's frozen scope names, never a value from a token or request.
- * Unset while no tool exists: absent resolver means nothing to check, not "check nothing".
+ * The composition root always supplies it; when it is absent, no scope check runs.
  *
  * **Three arguments, because introspection is authoritative over the signed claim.** The grant is
  * what live introspection returned for *this* request; `undefined` means no check established one
- * and the resolver must refuse rather than fall back to the token. *(Widened here by ticket 87 —
- * ticket 86 could not, being forbidden from touching this file, and bridged the gap with a shim
- * that has since been deleted. The shape is ticket 49's, adopted rather than reinvented.)*
+ * and the resolver must refuse rather than fall back to the token.
  */
 export type MissingScopeResolver = (
   routing: RequestRouting,
