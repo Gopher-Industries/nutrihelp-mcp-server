@@ -1,3 +1,4 @@
+import { unavailableConfirmations } from '../../support/confirmationFixture.ts';
 /**
  * Mandatory auth order, asserted with spies. Exact-equality sequences: insert/remove/reorder
  * breaks a case rather than a position-blind `toContain`.
@@ -1042,6 +1043,8 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
   ): (server: McpServer, ctx: McpRequestContext, authorizationFor: AuthorizationLookup) => void {
     return (server, ctx, authorizationFor) => {
       registerTools(server, ctx, {
+        confirmations: unavailableConfirmations,
+        logConfirmationAnomaly: () => undefined,
         nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
         authorizationFor,
         resourceMetadataUrl: RESOURCE_METADATA_URL,

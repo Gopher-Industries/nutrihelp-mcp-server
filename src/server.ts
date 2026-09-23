@@ -19,7 +19,7 @@ import { ConfirmationError } from './errors.ts';
 import { createConfirmationStore, type ConfirmationStoreOptions } from './consent/confirmation.ts';
 
 /**
- * Opens the confirmation store for a write tool to use; nothing composes it yet. url is trusted
+ * Opens the confirmation store for write tools. url is trusted
  * Render Key Value configuration, not model input.
  */
 export async function connectConfirmationStore(
@@ -41,7 +41,7 @@ export async function connectConfirmationStore(
 }
 
 /** Keep importing the connection factory free of configuration reads and HTTP listeners. */
-export function startServer() {
+export async function startServer() {
   const config = loadConfig();
 
   const tokenValidator = createTokenValidator({
@@ -110,74 +110,106 @@ export function startServer() {
     },
   });
 
-  const app = createHttpApp({
-    factory: (ctx, authorizationFor) => {
-      const server = new McpServer({
-        name: 'nutrihelp-mcp-server',
-        version: '1.0.0',
-      });
-
-      registerTools(server, ctx, {
-        nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
-        // How dispatch reads what this request established. Handed in rather than imported: the
-        // WeakMap is scoped to this app instance, so one instance cannot answer another's request.
-        authorizationFor,
-        // The security channel, same shape and same sink as the revocation checker's above. A
-        // dispatch denied at the trust boundary is security-relevant, and without this the refusal
-        // is thrown into the SDK where nothing ever calls toLog() — so the identifiers an operator
-        // needs are built and discarded, and the cheapest denials are the only ones reported.
-        logSecurity: (event) => {
-          console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
-        },
-        // And its operational twin, the same pair the revocation checker takes above. A spent
-        // request budget is ordinary backend slowness reported by every outbound call, so filing it
-        // on the security channel would put one record per slow request in front of the denials.
-        logOperational: (event) => {
-          console.error(JSON.stringify({ level: 'warn', channel: 'operational', ...event }));
-        },
-        resourceMetadataUrl,
-        // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
-        // so every dispatch reaching a tool today has no durable audit record behind it. Stated
-        // here rather than omitted: a composition that skips the field would read as satisfied.
-        auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
-      });
-
-      return server;
-    },
-    allowedOriginHostnames: config.allowedOriginHostnames,
-    resourceMetadata: protectedResourceMetadata({
-      resourceIdentifier: config.resourceIdentifier,
-      authorizationServers: [config.authServerUrl],
-    }),
-    authorization: {
-      validator: tokenValidator,
-      revocation: revocationChecker,
-      credentials: upstreamCredentialProvider,
-      requestDeadlineMs: config.requestDeadlineMs,
-      // Step 3, straight from the frozen map. The transport carries the grant introspection just
-      // established into this call as the third argument, so no hand-off record is involved.
-      missingScopeFor,
-    },
-    onError: (error: Error) => {
-      // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.
-      console.error(JSON.stringify({ level: 'error', msg: error.message }));
-    },
+  const leaseMs = config.requestDeadlineMs + 1_000;
+  const confirmations = await connectConfirmationStore(config.redisUrl, {
+    leaseMs,
+    lifetimeMs: Math.max(300_000, leaseMs),
   });
-  // Said once at startup, loudly, because the placeholder wired as `auditEnqueue` above resolves
-  // without recording anything and nothing else in a running process would reveal that.
-  console.warn(
-    JSON.stringify({
-      level: 'warn',
-      msg: 'audit enqueue is a placeholder: tool calls are dispatched WITHOUT a durable audit record. Do not deploy this build.',
-    })
-  );
-  const listener = app.listen(config.port, () => {
-    console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
-  });
+  try {
+    const app = createHttpApp({
+      factory: (ctx, authorizationFor) => {
+        const server = new McpServer({
+          name: 'nutrihelp-mcp-server',
+          version: '1.0.0',
+        });
 
-  return { listener, upstreamCredentialProvider };
+        registerTools(server, ctx, {
+          confirmations,
+          logConfirmationAnomaly: (event) => {
+            console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
+          },
+          nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
+          // How dispatch reads what this request established. Handed in rather than imported: the
+          // WeakMap is scoped to this app instance, so one instance cannot answer another's request.
+          authorizationFor,
+          // The security channel, same shape and same sink as the revocation checker's above. A
+          // dispatch denied at the trust boundary is security-relevant, and without this the refusal
+          // is thrown into the SDK where nothing ever calls toLog() — so the identifiers an operator
+          // needs are built and discarded, and the cheapest denials are the only ones reported.
+          logSecurity: (event) => {
+            console.error(JSON.stringify({ level: 'warn', channel: 'security', ...event }));
+          },
+          // And its operational twin, the same pair the revocation checker takes above. A spent
+          // request budget is ordinary backend slowness reported by every outbound call, so filing it
+          // on the security channel would put one record per slow request in front of the denials.
+          logOperational: (event) => {
+            console.error(JSON.stringify({ level: 'warn', channel: 'operational', ...event }));
+          },
+          resourceMetadataUrl,
+          // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
+          // so every dispatch reaching a tool today has no durable audit record behind it. Stated
+          // here rather than omitted: a composition that skips the field would read as satisfied.
+          auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+        });
+
+        return server;
+      },
+      allowedOriginHostnames: config.allowedOriginHostnames,
+      resourceMetadata: protectedResourceMetadata({
+        resourceIdentifier: config.resourceIdentifier,
+        authorizationServers: [config.authServerUrl],
+      }),
+      authorization: {
+        validator: tokenValidator,
+        revocation: revocationChecker,
+        credentials: upstreamCredentialProvider,
+        requestDeadlineMs: config.requestDeadlineMs,
+        // Step 3, straight from the frozen map. The transport carries the grant introspection just
+        // established into this call as the third argument, so no hand-off record is involved.
+        missingScopeFor,
+      },
+      onError: (error: Error) => {
+        // TODO(logging): pino. Message only — jose errors can carry a decoded token payload.
+        console.error(JSON.stringify({ level: 'error', msg: error.message }));
+      },
+    });
+    // Said once at startup, loudly, because the placeholder wired as `auditEnqueue` above resolves
+    // without recording anything and nothing else in a running process would reveal that.
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        msg: 'audit enqueue is a placeholder: tool calls are dispatched WITHOUT a durable audit record. Do not deploy this build.',
+      })
+    );
+    const listener = app.listen(config.port, () => {
+      console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
+    });
+    const shutdown = () => {
+      listener.close();
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+    listener.once('error', confirmations.close);
+    listener.once('close', () => {
+      confirmations.close();
+      process.removeListener('SIGINT', shutdown);
+      process.removeListener('SIGTERM', shutdown);
+    });
+    return { listener, upstreamCredentialProvider, confirmations };
+  } catch (error) {
+    confirmations.close();
+    throw error;
+  }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  startServer();
+  startServer().catch(() => {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        msg: 'Server startup failed; check configuration and Redis availability.',
+      })
+    );
+    process.exitCode = 1;
+  });
 }

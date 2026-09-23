@@ -362,3 +362,89 @@ export async function fetchUpstream(request: UpstreamRequest): Promise<Response>
     redirect: 'error',
   });
 }
+
+/** Generic write boundary. Tools own schemas; this module owns outbound policy. */
+export interface CredentialedJsonPost {
+  readonly baseUrl: string;
+  readonly path: string;
+  readonly declaredFields: readonly string[];
+  readonly body: Readonly<Record<string, unknown>>;
+  readonly credential: string;
+  readonly idempotencyKeyHash: string;
+  readonly correlationId: string;
+  readonly deadlineMs: number;
+}
+
+async function readBoundedJson(response: Response): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new TypeError('Upstream response is empty');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk: unknown = next.value;
+      if (!(chunk instanceof Uint8Array)) throw new TypeError('Invalid response chunk');
+      size += chunk.byteLength;
+      if (size > 32 * 1024) throw new TypeError('Upstream response exceeds its limit');
+      chunks.push(chunk);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+}
+
+export async function postCredentialedJson(
+  request: CredentialedJsonPost
+): Promise<{ status: number; body?: unknown }> {
+  const base = new URL(request.baseUrl);
+  const url = new URL(request.path, base);
+  if (
+    base.protocol !== 'https:' ||
+    base.username ||
+    base.password ||
+    base.search ||
+    base.hash ||
+    url.username ||
+    url.password
+  )
+    throw new TypeError('Writes require the configured HTTPS backend');
+  assertSafeUpstreamUrl(url, base, request.body);
+  if (
+    !/^[0-9a-f]{64}$/.test(request.idempotencyKeyHash) ||
+    !/^[A-Za-z0-9\-._~+/]+=*$/.test(request.credential)
+  ) {
+    throw new TypeError('A backend credential and confirmation digest are required');
+  }
+  if (!Number.isSafeInteger(request.deadlineMs) || request.deadlineMs <= 0) {
+    throw new TypeError('A positive remaining deadline is required');
+  }
+  const declared = new Set(request.declaredFields);
+  for (const field of Object.keys(request.body)) {
+    if (isIdentityField(field) || !declared.has(field)) {
+      throw new TypeError('Undeclared or identity-bearing JSON field');
+    }
+  }
+  const body = JSON.stringify(request.body);
+  if (Buffer.byteLength(body, 'utf8') > 32 * 1024) throw new TypeError('Request is too large');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      authorization: `Bearer ${request.credential}`,
+      'idempotency-key': request.idempotencyKeyHash,
+      [CORRELATION_ID_HEADER]: request.correlationId,
+    },
+    body,
+    redirect: 'error',
+    signal: AbortSignal.timeout(request.deadlineMs),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    return { status: response.status };
+  }
+  return { status: response.status, body: await readBoundedJson(response) };
+}

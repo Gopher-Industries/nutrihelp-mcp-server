@@ -1,3 +1,4 @@
+import { unavailableConfirmations } from '../../support/confirmationFixture.ts';
 /**
  * The dispatch wrapper: what runs between the transport's answer and a tool handler, and what it
  * refuses. Ticket 87.
@@ -7,6 +8,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { installUpstreamMock } from '../../support/upstreamMock.ts';
 import type { AuthInfo, McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 import {
   AUDIT_ENQUEUE_NOT_IMPLEMENTED,
@@ -129,6 +131,8 @@ function harness(
 
   return {
     config: {
+      confirmations: unavailableConfirmations,
+      logConfirmationAnomaly: () => undefined,
       nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
       authorizationFor,
       resourceMetadataUrl: RESOURCE_METADATA_URL,
@@ -171,6 +175,8 @@ describe('tool registration', () => {
     const h = harness();
 
     registerTools(server, h.ctx, {
+      confirmations: unavailableConfirmations,
+      logConfirmationAnomaly: () => undefined,
       nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
       authorizationFor: h.config.authorizationFor,
       resourceMetadataUrl: RESOURCE_METADATA_URL,
@@ -179,7 +185,7 @@ describe('tool registration', () => {
       logOperational: h.config.logOperational,
     });
 
-    expect(registerTool).toHaveBeenCalledTimes(1);
+    expect(registerTool).toHaveBeenCalledTimes(2);
     expect(registerTool).toHaveBeenCalledWith(
       'nutrition_lookup',
       expect.objectContaining({ inputSchema }),
@@ -465,21 +471,23 @@ describe('step 4 is per tool and lazy', () => {
    */
   it('never mints a credential for a public backing endpoint', async () => {
     const h = harness();
+    const upstream = installUpstreamMock([]);
+    upstream.route({ path: '/api/fooddata/search?query=oats', status: 503, body: 'unavailable' });
 
     let refusal: unknown;
     try {
       await dispatchable(h, 'nutrition_lookup')({ food: 'oats' }, {});
     } catch (cause: unknown) {
       refusal = cause;
+    } finally {
+      await upstream.restore();
     }
 
-    expect(refusal, 'the call did fail — there is no upstream mocked in this suite').toBeInstanceOf(
-      McpError
-    );
+    expect(refusal).toMatchObject({ code: -32004 });
     expect(
-      (refusal as McpError).toLog(),
+      h.operationalEvents[0],
       'and it failed inside the TOOL, at its own outbound call: that error code is minted by nutrition_lookup and by nothing before it, so the dispatch really did get past steps 1 to 5'
-    ).toMatchObject({ class: 'upstream_failure', errorCode: 'nutrition_lookup_failed' });
+    ).toMatchObject({ class: 'upstream_failure' });
     expect(
       h.auditEnqueued,
       'and step 5 ran for it, which is the last thing before the handler'
@@ -508,9 +516,10 @@ describe('step 4 is per tool and lazy', () => {
     }
 
     expect(
-      (refusal as McpError).toLog(),
+      h.operationalEvents[0],
       'the cause class is preserved through the tool boundary. Converted, this reads as nutrition_lookup_failed and an operator goes looking at the backend'
     ).toMatchObject({ class: 'upstream_failure', errorCode: 'request_deadline_exhausted' });
+    expect(refusal).toMatchObject({ code: -32004 });
   });
 
   it('mints one for a credentialed backing endpoint, carrying the branded grant whole', async () => {

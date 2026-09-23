@@ -1,3 +1,4 @@
+import { unavailableConfirmations } from '../../support/confirmationFixture.ts';
 /**
  * The frozen scope set, the tool-to-scope map, and the two-sided scope decision. Ticket 86.
  *
@@ -359,6 +360,8 @@ describe('every registered tool is in the map', () => {
     } as unknown as McpServer;
 
     registerTools(server, {} as McpRequestContext, {
+      confirmations: unavailableConfirmations,
+      logConfirmationAnomaly: () => undefined,
       nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
       // Nothing is dispatched here — only the registered NAMES are read — so a lookup that
       // resolves nothing is the honest fixture.
