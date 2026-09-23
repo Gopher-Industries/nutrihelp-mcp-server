@@ -487,7 +487,7 @@ describe('step 4 is per tool and lazy', () => {
     expect(
       h.operationalEvents[0],
       'and it failed inside the TOOL, at its own outbound call: that error code is minted by nutrition_lookup and by nothing before it, so the dispatch really did get past steps 1 to 5'
-    ).toMatchObject({ class: 'upstream_failure' });
+    ).toMatchObject({ class: 'upstream_failure', errorCode: 'nutrition_lookup_failed' });
     expect(
       h.auditEnqueued,
       'and step 5 ran for it, which is the last thing before the handler'
