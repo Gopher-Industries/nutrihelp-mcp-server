@@ -21,6 +21,8 @@ import {
 /** Every variable this module requires. The list is the subject of the first test below: a
  *  variable dropped from the required set is a variable that silently becomes optional. */
 const REQUIRED_VARS = [
+  'CONFIRMATION_STORE',
+  'REDIS_URL',
   'PORT',
   'MCP_ALLOWED_ORIGINS',
   'MCP_JWKS_URL',
@@ -47,6 +49,8 @@ const CLIENT_ASSERTION_KEY_PEM = generateKeyPairSync('ec', { namedCurve: 'P-256'
 
 /** A complete, valid deployment configuration in test clothing. */
 const VALID: Record<RequiredVar, string> = {
+  CONFIRMATION_STORE: 'shared',
+  REDIS_URL: 'redis://127.0.0.1:6379',
   PORT: '3000',
   MCP_ALLOWED_ORIGINS: ALLOWED_ORIGIN,
   MCP_JWKS_URL: MCP_JWKS_URL,
@@ -217,6 +221,26 @@ afterEach(() => {
 });
 
 describe('the complete valid configuration', () => {
+  it.each(['stateless', 'memory', 'redis'])('refuses unapproved confirmation mode %s', (mode) => {
+    set('CONFIRMATION_STORE', mode);
+    expect(() => loadConfig()).toThrow('CONFIRMATION_STORE');
+  });
+
+  it.each(['not-a-url', 'https://redis.test', 'redis://localhost?secret=x', 'redis://localhost#x'])(
+    'refuses invalid Redis configuration %s',
+    (url) => {
+      set('REDIS_URL', url);
+      expect(() => loadConfig()).toThrow('REDIS_URL');
+    }
+  );
+
+  it('accepts shared TLS Redis without exposing credentials', () => {
+    set('REDIS_URL', 'rediss://user:password@redis.test:6380/0');
+    expect(loadConfig()).toMatchObject({
+      confirmationStore: 'shared',
+      redisUrl: 'rediss://user:password@redis.test:6380/0',
+    });
+  });
   /**
    * The anti-vacuity case, and it comes first on purpose: a loader hard-wired to throw satisfies
    * every refusal assertion in this file. Nothing below means anything without this.
@@ -261,7 +285,7 @@ describe('a required variable that is absent or blank', () => {
     expect(
       () => loadConfig(),
       `${name} has no default and no safe fallback: a server that boots without it accepts something it cannot check`
-    ).toThrow(/PORT|MCP_|NUTRIHELP_/);
+    ).toThrow(name);
   });
 
   it.each(REQUIRED_VARS)('names %s in the failure, so an operator knows which one', (name) => {

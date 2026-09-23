@@ -8,6 +8,8 @@
 import { createPrivateKey, type KeyObject } from 'node:crypto';
 
 export interface ServerConfig {
+  readonly confirmationStore: 'shared';
+  readonly redisUrl: string;
   readonly port: number;
   /** Hostnames only — the Origin guard is port-agnostic. */
   readonly allowedOriginHostnames: readonly string[];
@@ -241,6 +243,13 @@ function requiredPrivateKey(name: string): KeyObject {
 }
 
 export function loadConfig(): ServerConfig {
+  const confirmationStore = required('CONFIRMATION_STORE');
+  if (confirmationStore !== 'shared') throw new Error('CONFIRMATION_STORE must be shared');
+  const redisUrl = required('REDIS_URL');
+  const redis = parseUrl('REDIS_URL', redisUrl);
+  if (!['redis:', 'rediss:'].includes(redis.protocol) || redis.search || redis.hash) {
+    throw new Error('REDIS_URL must be a redis: or rediss: URL without query or fragment');
+  }
   const port = requiredWholeNumber('PORT', 1, 65535);
 
   const allowedOrigins = required('MCP_ALLOWED_ORIGINS')
@@ -272,6 +281,8 @@ export function loadConfig(): ServerConfig {
   }
 
   return {
+    confirmationStore,
+    redisUrl,
     port,
     allowedOriginHostnames,
     nutrihelpApiBaseUrl: requiredApiBaseUrl(),

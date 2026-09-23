@@ -39,7 +39,12 @@ const RECIPE_ANCHOR = 'MCP_RESOURCE_IDENTIFIER=';
  * a shell leftover of either would let a recipe that dropped it pass.
  */
 const PORT_VAR = 'PORT';
-const UNPREFIXED_VARS: readonly string[] = [PORT_VAR, 'NUTRIHELP_API_BASE_URL'];
+const UNPREFIXED_VARS: readonly string[] = [
+  PORT_VAR,
+  'NUTRIHELP_API_BASE_URL',
+  'CONFIRMATION_STORE',
+  'REDIS_URL',
+];
 
 /**
  * Loopback names: a fact about the internet, not the README, so this is the one hand-written

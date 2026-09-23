@@ -4,6 +4,9 @@
  */
 
 import type { Server } from 'node:http';
+import { unavailableConfirmations } from './confirmationFixture.ts';
+import type { ConfirmationStore } from '../../src/consent/confirmation.ts';
+import type { ConfirmationAnomalyEvent } from '../../src/tools/registry.ts';
 import type { AddressInfo } from 'node:net';
 import { generateKeyPairSync } from 'node:crypto';
 import { Agent, request } from 'undici';
@@ -133,6 +136,8 @@ export type RevocationFixture = RevocationChecker | RevocationDisabled | 'live';
 export type CredentialsFixture = UpstreamCredentialProvider | CredentialsDisabled | 'live';
 
 export interface TestServerOptions {
+  readonly confirmations?: ConfirmationStore;
+  readonly logConfirmationAnomaly?: (event: ConfirmationAnomalyEvent) => void;
   /** How a case chooses the door check. The composition root supplies the real frozen one. */
   readonly missingScopeFor?: MissingScopeResolver;
   /** Fires once a request reaches the MCP handler — otherwise dispatch is invisible with no tools registered. */
@@ -324,6 +329,8 @@ export async function startTestServer(
       const server = new McpServer({ name: 'nutrihelp-mcp-server', version: '1.0.0' });
       if (options.registerRealTools === true) {
         registerTools(server, ctx, {
+          confirmations: options.confirmations ?? unavailableConfirmations,
+          logConfirmationAnomaly: options.logConfirmationAnomaly ?? (() => undefined),
           nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
           authorizationFor,
           resourceMetadataUrl: RESOURCE_METADATA_URL,

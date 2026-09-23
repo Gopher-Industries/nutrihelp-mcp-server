@@ -163,6 +163,8 @@ repository root and put this in it:
 
 ```ini
 PORT=3000
+CONFIRMATION_STORE=shared
+REDIS_URL=redis://127.0.0.1:16380
 MCP_ALLOWED_ORIGINS=http://localhost:6274,http://127.0.0.1:6274
 MCP_JWKS_URL=https://127.0.0.1:8443/jwks
 MCP_EXPECTED_ISSUER=https://127.0.0.1:8443
@@ -795,6 +797,32 @@ repository, so a fresh clone does not carry them — ask the MCP team lead rathe
 reconstructing intent from the code.
 
 ## Confirmation store
+
+### Meal recording and deployment
+
+Only `CONFIRMATION_STORE=shared` is accepted. `REDIS_URL` must name the shared Redis
+service (`redis:` or `rediss:`); there is no stateless or in-memory deployment option.
+Start local Redis before running the development server, for example:
+
+```powershell
+docker run --detach --rm --name nutrihelp-meal-redis -p 127.0.0.1:16380:6379 redis:7-alpine
+docker exec nutrihelp-meal-redis redis-cli ping
+```
+
+Startup opens Redis before listening and refuses to start if it is unavailable.
+The lease exceeds the request deadline; shutdown closes the store.
+The registry owns authorization, scope checks, credential exchange and result framing.
+The meal tool binds confirmations to the live grant's subject, client and grant identifiers.
+It previews the exact snapshot, then writes only after a matching confirmation.
+Unknown, expired and mismatched tokens return a new preview requiring fresh user confirmation;
+only mismatches emit a narrow, token-free security anomaly.
+The backend receives the SHA-256 digest as Idempotency-Key and the exchanged credential.
+Backend errors never return their body; 401/403 are upstream failures, not login challenges.
+Completed results and replays expose only the receipt id and status.
+
+The registry still has the documented non-durable audit placeholder. Do not enable live
+writes until the team has supplied durable audit and enabled the backend endpoint.
+The existing Redis CI job runs both confirmation-store and record-meal integration suites.
 
 The module at `src/consent/confirmation.ts` retains the `pending` / `in_progress` /
 `done` state model. It accepts a local `{ eval }` port and does not import the

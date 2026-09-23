@@ -8,6 +8,10 @@
  */
 
 import type { McpServer, McpRequestContext, ToolCallback } from '@modelcontextprotocol/server';
+import { ProtocolError, type CallToolResult } from '@modelcontextprotocol/server';
+import type { ConfirmationStore } from '../consent/confirmation.ts';
+import { PROTOCOL_ERROR_CODES } from '../errors.ts';
+import { descriptor as recordMeal } from './recordMeal.ts';
 import type { StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import type { AuthorizationLookup, RequestAuthorization } from '../transport/http.ts';
 import type { UpstreamCredential } from '../auth/upstreamToken.ts';
@@ -31,6 +35,12 @@ export type BackingEndpoint = 'public' | 'credentialed';
  * passed — so a handler cannot be constructed without them having run.
  */
 export interface ToolRequest {
+  readonly caller: {
+    readonly subject: string;
+    readonly clientId: string;
+    readonly grantId: string;
+  };
+  readonly confirmations: ConfirmationStore;
   readonly nutrihelpApiBaseUrl: string;
   /**
    * What is LEFT of the one end-to-end budget, read **at the moment of the outbound call** rather
@@ -133,7 +143,69 @@ export type RegistrySecurityEvent = Extract<
  */
 export type RegistryOperationalEvent = Extract<McpErrorLogPayload, { class: 'upstream_failure' }>;
 
+/** A separate, narrow security event. Never serialise a confirmation error's whole log payload. */
+export interface ConfirmationAnomalyEvent {
+  readonly detailCode: 'confirmation_mismatch';
+  readonly tool: string;
+  readonly grantId: string;
+  readonly correlationId: string;
+}
+
+function logToolFailure(
+  config: RegistryConfig,
+  authorization: RequestAuthorization,
+  tool: string,
+  error: McpError
+): void {
+  const log = error.toLog();
+  if (log.class === 'upstream_failure' && log.errorCode !== 'request_deadline_exhausted') {
+    emit(() => {
+      config.logOperational(log);
+    });
+  }
+  if (log.class === 'confirmation_required' && log.detailCode === 'confirmation_mismatch') {
+    emit(() => {
+      config.logConfirmationAnomaly({
+        detailCode: 'confirmation_mismatch',
+        tool,
+        grantId: authorization.grant.grantId,
+        correlationId: authorization.correlationId,
+      });
+    });
+  }
+}
+
+async function frameToolResult(
+  config: RegistryConfig,
+  authorization: RequestAuthorization,
+  tool: string,
+  run: () => unknown
+): Promise<CallToolResult> {
+  try {
+    return (await run()) as CallToolResult;
+  } catch (error) {
+    if (!(error instanceof McpError)) {
+      throw new ProtocolError(
+        PROTOCOL_ERROR_CODES.upstream_failure,
+        'The service is temporarily unavailable.'
+      );
+    }
+    logToolFailure(config, authorization, tool, error);
+    const payload = error.toModel();
+    if (payload.class === 'confirmation_required' || payload.class === 'invalid_input') {
+      return {
+        isError: payload.class === 'invalid_input',
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
+        ...(payload.class === 'confirmation_required' ? { structuredContent: payload } : {}),
+      };
+    }
+    throw new ProtocolError(PROTOCOL_ERROR_CODES[payload.class], payload.message, payload);
+  }
+}
+
 export interface RegistryConfig {
+  readonly confirmations: ConfirmationStore;
+  readonly logConfirmationAnomaly: (event: ConfirmationAnomalyEvent) => void;
   readonly nutrihelpApiBaseUrl: string;
   /** Step 5. **Required**: optional would let the step vanish with nothing to notice it. */
   readonly auditEnqueue: AuditEnqueue;
@@ -314,7 +386,7 @@ async function credentialFor(
   backing: BackingEndpoint
 ): Promise<UpstreamCredential | undefined> {
   if (backing === 'public') return undefined;
-  return authorization.credentialFor({
+  const credential = await authorization.credentialFor({
     subjectToken: authorization.subjectToken,
     // Carried whole. Decomposing it into strings loses the brand and the token digest, which are
     // together what let the minter refuse a grant paired with a different token.
@@ -322,6 +394,20 @@ async function credentialFor(
     correlationId: authorization.correlationId,
     deadlineMs: remainingBudgetMs(config, authorization),
   });
+  if (!credential.accessToken || credential.accessToken === authorization.subjectToken) {
+    throw reportOperational(
+      config,
+      new McpError({
+        class: 'upstream_failure',
+        statusClass: 'unusable_credential',
+        errorCode: 'backend_credential_unavailable',
+        endpointClass: 'tool_dispatch',
+        correlationId: authorization.correlationId,
+        latencyMs: 0,
+      })
+    );
+  }
+  return credential;
 }
 
 /**
@@ -411,13 +497,19 @@ function registerOne<InputArgs extends StandardSchemaWithJSON>(
     });
 
     const inner = tool.handler({
+      caller: Object.freeze({
+        subject: authorization.grant.subject,
+        clientId: authorization.grant.clientId,
+        grantId: authorization.grant.grantId,
+      }),
+      confirmations: config.confirmations,
       nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
       remainingBudgetMs: () => remainingBudgetMs(config, authorization),
       correlationId: authorization.correlationId,
       credential,
     }) as (args: unknown, callContext: unknown) => unknown;
 
-    return inner(args, callContext);
+    return frameToolResult(config, authorization, tool.name, () => inner(args, callContext));
   }) as ToolCallback<InputArgs>;
 
   server.registerTool(tool.name, { ...tool.contract, inputSchema: tool.inputSchema }, dispatch);
@@ -452,7 +544,7 @@ function shipped<InputArgs extends StandardSchemaWithJSON>(
 }
 
 /** The tools this server ships. A descriptor reaches the trust boundary by being in this list. */
-const SHIPPED_TOOLS: readonly ShippedTool[] = [shipped(nutritionLookup)];
+const SHIPPED_TOOLS: readonly ShippedTool[] = [shipped(nutritionLookup), shipped(recordMeal)];
 
 /**
  * **The startup throw.** The core is stateless, so a server — and therefore every registration —
