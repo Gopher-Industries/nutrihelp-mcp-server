@@ -575,4 +575,3 @@ export function registerTools(
     registerOne(server, ctx, config, tool, 'injected');
   }
 }
-

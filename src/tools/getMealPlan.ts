@@ -1,12 +1,15 @@
 import { z } from 'zod';
+import { TOOL_SCOPES } from '../auth/scopes.ts';
 import { getWithCredential } from '../upstream/client.ts';
 
 const MAX_MEALS = 6;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 
-export interface GetMealPlanConfig {
+interface ToolRequest {
   readonly nutrihelpApiBaseUrl: string;
-  readonly requestDeadlineMs: number;
+  readonly remainingBudgetMs: () => number;
+  readonly correlationId: string;
+  readonly credential: { readonly accessToken: string } | undefined;
 }
 
 const inputSchema = z.object({
@@ -14,9 +17,23 @@ const inputSchema = z.object({
   meal_type: z.string().optional(),
 });
 
+const outputSchema = z.object({
+  meals: z.array(
+    z.object({
+      date: z.unknown(),
+      meal_slot: z.unknown(),
+      recipe_id: z.unknown(),
+      recipe_name: z.unknown(),
+      energy: z.unknown(),
+    })
+  ),
+});
+
 const contract = {
+  title: 'Get Meal Plan',
   description:
     "Get the authenticated user's meal plan. The user is identified only by the access token.",
+  outputSchema,
 };
 
 function formatMealPlan(rows: unknown[]) {
@@ -49,55 +66,60 @@ function extractMealRows(body: unknown): unknown[] {
   return [];
 }
 
-export const handler =
-  (config: GetMealPlanConfig, accessToken: string) => async (args: z.infer<typeof inputSchema>) => {
-    const url = new URL('/api/mealplan/me', config.nutrihelpApiBaseUrl);
+export const handler = (request: ToolRequest) => async (args: z.infer<typeof inputSchema>) => {
+  if (request.credential === undefined) {
+    throw new Error('Meal plan requires an upstream credential');
+  }
 
-    if (args.date !== undefined) {
-      url.searchParams.set('date', args.date);
-    }
+  const url = new URL('/api/mealplan/me', request.nutrihelpApiBaseUrl);
 
-    if (args.meal_type !== undefined) {
-      url.searchParams.set('meal_type', args.meal_type);
-    }
+  if (args.date !== undefined) {
+    url.searchParams.set('date', args.date);
+  }
 
-    const response = await getWithCredential({
-      url,
-      accessToken,
-      deadlineMs: config.requestDeadlineMs,
-      correlationId: undefined,
-      redirect: 'error',
-    });
+  if (args.meal_type !== undefined) {
+    url.searchParams.set('meal_type', args.meal_type);
+  }
 
-    if (!response.ok) {
-      throw new Error(`Meal plan request failed with status ${String(response.status)}`);
-    }
+  const response = await getWithCredential({
+    url,
+    accessToken: request.credential.accessToken,
+    deadlineMs: request.remainingBudgetMs(),
+    correlationId: request.correlationId,
+    redirect: 'error',
+  });
 
-    const body: unknown = await response.json();
-    const rows = extractMealRows(body);
+  if (!response.ok) {
+    throw new Error(`Meal plan request failed with status ${String(response.status)}`);
+  }
 
-    const output = {
-      meals: formatMealPlan(rows),
-    };
+  const body: unknown = await response.json();
+  const rows = extractMealRows(body);
 
-    if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_RESPONSE_BYTES) {
-      throw new Error('Meal plan response exceeded the maximum response size');
-    }
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: JSON.stringify(output, null, 2),
-        },
-      ],
-      structuredContent: output,
-    };
+  const output = {
+    meals: formatMealPlan(rows),
   };
+
+  if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_RESPONSE_BYTES) {
+    throw new Error('Meal plan response exceeded the maximum response size');
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(output, null, 2),
+      },
+    ],
+    structuredContent: output,
+  };
+};
 
 export const descriptor = {
   name: 'get_meal_plan',
   contract,
   inputSchema,
+  scope: TOOL_SCOPES.get_meal_plan,
+  backing: 'credentialed',
   handler,
 } as const;

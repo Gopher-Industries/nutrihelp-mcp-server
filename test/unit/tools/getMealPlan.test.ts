@@ -13,9 +13,10 @@ vi.mock('../../../src/upstream/client.ts', () => ({
 }));
 
 describe('get_meal_plan', () => {
-  const config = {
+  const baseRequest = {
     nutrihelpApiBaseUrl: 'https://api.nutrihelp.test',
-    requestDeadlineMs: 30_000,
+    remainingBudgetMs: () => 30_000,
+    correlationId: 'test-correlation-id',
   };
 
   it('sends only the verified token and keeps two users isolated', async () => {
@@ -44,28 +45,35 @@ describe('get_meal_plan', () => {
       return Promise.resolve(
         new Response(JSON.stringify(meals), {
           status: 200,
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+          },
         })
       );
     });
 
-    const userAResult = await handler(
-      config,
-      'token-user-a'
-    )({
+    const userAResult = await handler({
+      ...baseRequest,
+      credential: {
+        accessToken: 'token-user-a',
+      },
+    })({
       date: '2026-09-15',
     });
 
-    const userBResult = await handler(
-      config,
-      'token-user-b'
-    )({
+    const userBResult = await handler({
+      ...baseRequest,
+      credential: {
+        accessToken: 'token-user-b',
+      },
+    })({
       date: '2026-09-15',
     });
 
     expect(getWithCredentialMock).toHaveBeenCalledTimes(2);
 
     const calls = getWithCredentialMock.mock.calls;
+
     const firstCall = calls[0]?.[0] as CredentialRequest;
     const secondCall = calls[1]?.[0] as CredentialRequest;
 
@@ -82,6 +90,7 @@ describe('get_meal_plan', () => {
 
     expect(String(firstCall.url)).not.toContain('user_id');
     expect(String(firstCall.url)).not.toContain('userId');
+
     expect(String(secondCall.url)).not.toContain('user_id');
     expect(String(secondCall.url)).not.toContain('userId');
 
