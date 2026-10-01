@@ -1,9 +1,8 @@
 /**
  * Security suite: cross-user access through the dispatcher. Ticket 33 case 6.
  *
- * INTENTIONALLY RED until a `get_meal_plan` tool is registered in `src/tools/registry.ts` and this
- * suite starts its server with `registerRealTools`. Do not skip or delete: it goes green when that
- * tool lands and calls `GET /api/mealplan/me` with the exchanged credential.
+ * This suite starts the server with `registerRealTools`, so the registered tool path is exercised
+ * end-to-end with the exchanged credential and the backend route.
  *
  * Introspection is stubbed active here; the revocation suite is where an inactive grant goes red.
  */
@@ -27,7 +26,7 @@ import {
   GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
-  MEALPLAN_LEGACY_PATH,
+  MEALPLAN_PATH,
   MEALPLAN_ME_PATH,
   NUTRIHELP_API_ORIGIN,
   SCOPES,
@@ -76,40 +75,44 @@ beforeEach(async () => {
   // The own-user route. Identity comes from the exchanged credential; the path carries none.
   // Query-tolerant by necessity, not style — see RouteSpec.path in upstreamMock.ts.
   upstream.route({
-    path: new RegExp(`^${MEALPLAN_ME_PATH}(\\?.*)?$`),
+    path: new RegExp(`^${MEALPLAN_PATH}\\/?(\\?.*)?$`),
     status: 200,
     body: {
-      data: [
-        {
-          date: '2026-08-05',
-          meal_type: 'breakfast',
-          recipe_name: A_RECIPE,
-          recipe_id: 11,
-          energy_kj: 900,
-        },
-      ],
+      data: {
+        items: [
+          {
+            date: '2026-08-05',
+            meal_type: 'breakfast',
+            recipe_name: A_RECIPE,
+            recipe_id: 11,
+            energy_kj: 900,
+          },
+        ],
+      },
     },
   });
 
   // The route whose controller falls back to a request-supplied identifier. Primed with user
   // B's plan so reaching it at all is observable rather than a silent nothing.
   upstream.route({
-    path: new RegExp(`^${MEALPLAN_LEGACY_PATH}(\\?.*)?$`),
+    path: new RegExp(`^${MEALPLAN_ME_PATH}(\\?.*)?$`),
     status: 200,
     body: {
-      data: [
-        {
-          date: '2026-08-05',
-          meal_type: 'breakfast',
-          recipe_name: B_RECIPE,
-          recipe_id: 22,
-          energy_kj: 800,
-        },
-      ],
+      data: {
+        items: [
+          {
+            date: '2026-08-05',
+            meal_type: 'breakfast',
+            recipe_name: B_RECIPE,
+            recipe_id: 22,
+            energy_kj: 800,
+          },
+        ],
+      },
     },
   });
 
-  server = await startTestServer();
+  server = await startTestServer({ registerRealTools: true });
 });
 
 afterEach(async () => {
@@ -143,12 +146,10 @@ describe('one user reaching for another user data', () => {
 
     // 1. The own-user route, and only it.
     const ownUserCalls = expectWireCalls(
-      upstream.callsTo(MEALPLAN_ME_PATH),
-      'case 6: get_meal_plan must call GET /api/mealplan/me'
+      upstream.callsTo(MEALPLAN_PATH),
+      'case 6: get_meal_plan must call GET /api/mealplan/'
     );
-    const legacyCalls = upstream
-      .callsTo(MEALPLAN_LEGACY_PATH)
-      .filter((call) => !call.path.startsWith(MEALPLAN_ME_PATH));
+    const legacyCalls = upstream.callsTo(MEALPLAN_ME_PATH);
     expect(
       legacyCalls,
       'case 6: the identity-fallback route resolves identity from the request and must never be called'

@@ -4,9 +4,8 @@
  * The byte ceiling is 32 KiB and truncation sets `truncated` + `truncation_note`. Both were
  * unspecified when this suite was written, so neither is asserted here yet.
  *
- * INTENTIONALLY RED until `src/shape/bound.ts` exists and a `get_meal_plan` tool that uses it is
- * registered, with this suite starting its server with `registerRealTools`. Do not skip or delete:
- * it goes green when that tool lands.
+ * This suite starts the server with `registerRealTools` and verifies the meal-plan projection and
+ * response ceiling directly over the registered tool path.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -24,7 +23,7 @@ import {
   GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
-  MEALPLAN_ME_PATH,
+  MEALPLAN_PATH,
   SCOPES,
   USER_A,
 } from '../../support/testEnv.ts';
@@ -41,19 +40,24 @@ const LEAKED_NOTE = 'FREE-TEXT-CLINICAL-NOTE-DO-NOT-SHIP';
 const HUGE_UPSTREAM_BODY = {
   success: true,
   _contractWarnings: ['response shape drifted from the OpenAPI document'],
-  data: Array.from({ length: 500 }, (_, index) => ({
-    date: '2026-08-05',
-    meal_type: 'breakfast',
-    recipe_name: `Recipe number ${String(index)}`,
-    recipe_id: index,
-    energy_kj: 900 + index,
-    // Everything below is outside the projection and must not reach the model.
-    user_id: USER_A,
-    email: LEAKED_EMAIL,
-    internal_row_id: LEAKED_INTERNAL_ID,
-    clinical_note: LEAKED_NOTE,
-    ingredients: Array.from({ length: 40 }, (_, i) => `ingredient-${String(i)}-${'x'.repeat(64)}`),
-  })),
+  data: {
+    items: Array.from({ length: 500 }, (_, index) => ({
+      date: '2026-08-05',
+      meal_type: 'breakfast',
+      recipe_name: `Recipe number ${String(index)}`,
+      recipe_id: index,
+      energy_kj: 900 + index,
+      // Everything below is outside the projection and must not reach the model.
+      user_id: USER_A,
+      email: LEAKED_EMAIL,
+      internal_row_id: LEAKED_INTERNAL_ID,
+      clinical_note: LEAKED_NOTE,
+      ingredients: Array.from(
+        { length: 40 },
+        (_, i) => `ingredient-${String(i)}-${'x'.repeat(64)}`
+      ),
+    })),
+  },
 };
 
 const HUGE_UPSTREAM_BYTES = JSON.stringify(HUGE_UPSTREAM_BODY).length;
@@ -92,11 +96,11 @@ beforeEach(async () => {
     expires_in: 120,
   });
   upstream.route({
-    path: new RegExp(`^${MEALPLAN_ME_PATH}(\\?.*)?$`),
+    path: new RegExp(`^${MEALPLAN_PATH}\\/?(\\?.*)?$`),
     status: 200,
     body: HUGE_UPSTREAM_BODY,
   });
-  server = await startTestServer();
+  server = await startTestServer({ registerRealTools: true });
 });
 
 afterEach(async () => {

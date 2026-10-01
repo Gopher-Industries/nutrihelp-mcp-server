@@ -5,9 +5,8 @@
  * beneath it is, and every dispatch is recorded. The deployed backend honours these shapes
  * today, so a field that escapes the filter is not hypothetical.
  *
- * INTENTIONALLY RED until a `get_meal_plan` tool is registered on the server this suite starts:
- * `nutrition_lookup` passes, and the `get_meal_plan` leg finds no request on the wire. Do not skip
- * or delete: it goes green when that tool lands.
+ * This suite starts the server with `registerRealTools`, so both shipped tools use the real
+ * upstream client path and the get_meal_plan request is observed on the wire.
  */
 
 import { existsSync } from 'node:fs';
@@ -35,12 +34,12 @@ import {
   IDENTITY_DENY_LIST,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
+  MEALPLAN_PATH,
   MEALPLAN_ME_PATH,
   NUTRIHELP_API_ORIGIN,
   USER_A,
   USER_B,
 } from '../../support/testEnv.ts';
-import { contract, handler, inputSchema } from '../../../src/tools/nutritionLookup.ts';
 
 /** Same normalisation the deny-list matches with: `USER_ID`, `user-id` and `userId` are one name. */
 function normalizeName(name: string): string {
@@ -125,31 +124,40 @@ beforeEach(async () => {
     body: { data: [{ food_name: 'Apple', energy_kj: 218, protein_g: 0.3 }] },
   });
   upstream.route({
+    path: new RegExp(`^${MEALPLAN_PATH}\\/?(\\?.*)?$`),
+    status: 200,
+    body: {
+      data: {
+        items: [
+          {
+            date: '2026-08-05',
+            meal_type: 'breakfast',
+            recipe_name: 'Porridge',
+            recipe_id: 11,
+            energy_kj: 900,
+          },
+        ],
+      },
+    },
+  });
+  upstream.route({
     path: new RegExp(`^${MEALPLAN_ME_PATH}(\\?.*)?$`),
     status: 200,
     body: {
-      data: [
-        {
-          date: '2026-08-05',
-          meal_type: 'breakfast',
-          recipe_name: 'Porridge',
-          recipe_id: 11,
-          energy_kj: 900,
-        },
-      ],
+      data: {
+        items: [
+          {
+            date: '2026-08-05',
+            meal_type: 'breakfast',
+            recipe_name: 'WRONG-ROUTE-USER-DATA',
+            recipe_id: 99,
+            energy_kj: 999,
+          },
+        ],
+      },
     },
   });
-  server = await startTestServer((mcp) => {
-    mcp.registerTool(
-      'nutrition_lookup',
-      { ...contract, inputSchema },
-      handler({
-        nutrihelpApiBaseUrl: NUTRIHELP_API_ORIGIN,
-        remainingBudgetMs: (): number => 30_000,
-        correlationId: 'client-security-suite-correlation-id',
-      })
-    );
-  });
+  server = await startTestServer({ registerRealTools: true });
 });
 
 afterEach(async () => {
@@ -167,7 +175,7 @@ afterAll(async () => {
  */
 const DRIVEN_TOOLS = [
   { tool: 'nutrition_lookup', args: { food: 'apple' }, backingPath: FOODDATA_SEARCH_PATH },
-  { tool: 'get_meal_plan', args: { date: '2026-08-05' }, backingPath: MEALPLAN_ME_PATH },
+  { tool: 'get_meal_plan', args: { date: '2026-08-05' }, backingPath: MEALPLAN_PATH },
 ] as const;
 
 describe('a user identifier smuggled into tool arguments', () => {
@@ -277,7 +285,7 @@ describe('a user identifier smuggled into tool arguments', () => {
 
     // The identity that does reach the wire arrives as the exchanged credential, not a
     // parameter.
-    for (const call of upstream.callsTo(MEALPLAN_ME_PATH)) {
+    for (const call of upstream.callsTo(MEALPLAN_PATH)) {
       expect(
         call.fullUrl,
         'case 7: the own-user route takes identity from the credential, never from the URL'

@@ -1,29 +1,48 @@
 /**
- * Security suite: write confirmation replay and argument rebinding. Ticket 33 cases 8 and 9.
+ * Security suite: write confirmation replay and argument rebinding.
  *
- * WORDING CONFLICT: the ticket says "refused the second time", the plan says the repeat returns
- * the original result and writes nothing. Case 8 asserts the invariant both hold — exactly one
- * write reaches the backend.
+ * Ticket 33 cases 8 and 9.
  *
- * INTENTIONALLY RED, both cases, until a `record_meal` tool backed by `src/consent/confirmation.ts`
- * is registered and this suite starts its server with `registerRealTools`. Do not skip or delete:
- * they go green when `record_meal` lands.
+ * This suite uses:
+ *   - the real production registerTools path
+ *   - the real record_meal tool
+ *   - the real Redis-backed ConfirmationStore
+ *   - the real confirmation-token binding/replay logic
+ *
+ * Case 8:
+ *   - proposal does not write
+ *   - first confirmation writes exactly once
+ *   - replay of the same token never causes a second write
+ *
+ * Case 9:
+ *   - a confirmation token issued for one set of arguments cannot be
+ *     reused with different arguments
+ *   - the unapproved payload must never reach the backend
  */
 
+import { createClient } from '@redis/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { connectConfirmationStore } from '../../../src/server.ts';
+import { sha256, type ConfirmationStore } from '../../../src/consent/confirmation.ts';
+
 import { createTestKeyPair, makeToken, type TestKeyPair } from '../../../scripts/makeToken.ts';
+
 import {
   callTool,
   closeLocalDispatcher,
   startTestServer,
   type TestServer,
 } from '../../support/mcpClient.ts';
+
 import {
   installUpstreamMock,
   type UpstreamMock,
   type WireCall,
 } from '../../support/upstreamMock.ts';
+
 import { expectToolResult } from '../../support/assertions.ts';
+
 import {
   ANY_API_PATH,
   AUDIT_INGEST_PATH,
@@ -35,22 +54,42 @@ import {
   SCOPES,
   USER_A,
 } from '../../support/testEnv.ts';
+
 import type { ToolResultView } from '../../support/mcpClient.ts';
 
+/**
+ * These tests require the same disposable local Redis instance used
+ * by the existing recordMeal integration tests.
+ */
+const configured = process.env.MCP_CONFIRMATION_TEST_REDIS_URL;
+
+if (configured === undefined) {
+  console.warn(
+    'SKIP confirmation security tests: MCP_CONFIRMATION_TEST_REDIS_URL is absent. ' +
+      'CI supplies disposable Redis.'
+  );
+}
+
+/**
+ * The actual record_meal schema in src/tools/recordMeal.ts expects:
+ *
+ *   date
+ *   meal_type
+ *   food_name
+ *   time
+ */
 const SMALL_MEAL = {
-  items: [{ name: 'porridge', quantity: 1, unit: 'bowl' }],
+  date: '2026-08-05',
   meal_type: 'breakfast',
-  consumed_at: '2026-08-05T07:30:00Z',
+  food_name: 'porridge',
+  time: '07:30:00',
 };
 
-/** Materially larger than SMALL_MEAL: this is the change a replayed token must not authorise. */
 const LARGE_MEAL = {
-  items: [
-    { name: 'porridge', quantity: 6, unit: 'bowl' },
-    { name: 'chocolate cake', quantity: 3, unit: 'slice' },
-  ],
+  date: '2026-08-05',
   meal_type: 'dinner',
-  consumed_at: '2026-08-05T20:30:00Z',
+  food_name: 'porridge and chocolate cake',
+  time: '20:30:00',
 };
 
 let trustedKey: TestKeyPair;
@@ -58,42 +97,120 @@ let server: TestServer;
 let upstream: UpstreamMock;
 let token: string;
 
+let raw: ReturnType<typeof createClient>;
+let confirmationStore: Awaited<ReturnType<typeof connectConfirmationStore>>;
+
 /**
- * NOT just `POST`: a write issued as `PUT` or `PATCH` would otherwise count as zero and pass
- * every assertion below. The route path is unfixed, so writes are classified by what makes them
- * dangerous — they mutated state at the API origin.
+ * Confirmation keys created by this test suite.
+ *
+ * We delete only these keys.
+ * Never FLUSHDB because the Redis instance may contain data
+ * belonging to another test.
+ */
+const confirmationKeys: string[] = [];
+
+/**
+ * NOT just POST.
+ *
+ * A write using PUT, PATCH or DELETE must also count as a mutation.
  */
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function writeCalls(): WireCall[] {
-  return upstream.wireCalls().filter(
-    (call) =>
-      call.origin === NUTRIHELP_API_ORIGIN &&
-      MUTATING_METHODS.has(call.method.toUpperCase()) &&
-      // Audit ingest is a POST to the same origin and precedes every upstream call.
-      !call.path.startsWith(AUDIT_INGEST_PATH)
-  );
+  return upstream
+    .wireCalls()
+    .filter(
+      (call) =>
+        call.origin === NUTRIHELP_API_ORIGIN &&
+        MUTATING_METHODS.has(call.method.toUpperCase()) &&
+        !call.path.startsWith(AUDIT_INGEST_PATH)
+    );
 }
 
 /**
- * PLAN GAP: the confirmation-token field name is fixed nowhere. The input schema names the
- * argument `confirmation_token`, so that is the primary lookup; camel case is accepted so this
- * fails over behaviour rather than over a naming choice.
+ * Wrap the real Redis confirmation store so this suite can track
+ * and clean up only the confirmation keys it created.
+ *
+ * The wrapper deliberately preserves the exact ConfirmationStore
+ * method signatures. This avoids the previous TypeScript errors
+ * involving:
+ *
+ *   expiresAt: string vs number
+ *
+ * and:
+ *
+ *   JsonValue vs ConfirmationResult
+ */
+function tracked(store: ConfirmationStore): ConfirmationStore {
+  return {
+    issue: async (action) => {
+      const proposal = await store.issue(action);
+
+      confirmationKeys.push(`mcp:confirmation:v1:${sha256(proposal.confirmationToken)}`);
+
+      return proposal;
+    },
+
+    execute: (action, write) => store.execute(action, write),
+  };
+}
+
+/**
+ * Extract the confirmation token returned by the production
+ * record_meal confirmation flow.
  */
 function expectConfirmationToken(view: ToolResultView, context: string): string {
   const structured = (view.structured ?? {}) as Record<string, unknown>;
+
   const candidate = structured.confirmation_token ?? structured.confirmationToken;
 
   expect(
     typeof candidate,
-    `${context}: expected a pending action carrying a single-use confirmation token. Got: ${view.text.slice(0, 300)}`
+    `${context}: expected a pending action carrying a single-use confirmation token. ` +
+      `Got: ${view.text.slice(0, 300)}`
   ).toBe('string');
 
-  return typeof candidate === 'string' ? candidate : '';
+  if (typeof candidate !== 'string') {
+    throw new Error(`${context}: confirmation token was not returned as a string`);
+  }
+
+  return candidate;
 }
 
 beforeAll(async () => {
+  if (configured === undefined) {
+    return;
+  }
+
+  const parsed = new URL(configured);
+
+  /**
+   * These security tests must use disposable LOCAL Redis.
+   *
+   * Do not accidentally point this test suite at a production
+   * or shared Redis instance.
+   */
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
+    throw new Error('These security confirmation tests require disposable LOCAL Redis.');
+  }
+
+  raw = createClient({
+    url: configured,
+    socket: {
+      reconnectStrategy: false,
+    },
+  });
+
+  raw.on('error', () => undefined);
+
+  await raw.connect();
+
+  confirmationStore = await connectConfirmationStore(configured, {
+    leaseMs: 60000,
+  });
+
   trustedKey = await createTestKeyPair('mcp-signing-key-1');
+
   token = await makeToken({
     key: trustedKey,
     iss: MCP_EXPECTED_ISSUER,
@@ -106,7 +223,12 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  if (configured === undefined) {
+    return;
+  }
+
   upstream = installUpstreamMock([trustedKey]);
+
   upstream.introspect({
     active: true,
     scope: SCOPES.meallogWrite,
@@ -114,48 +236,141 @@ beforeEach(async () => {
     client_id: CLIENT_ID,
     grant_id: GRANT_A,
   });
+
   upstream.exchange({
     access_token: 'exchanged-credential-for-user-a',
     issued_token_type: 'urn:ietf:params:oauth:token-type:jwt',
     token_type: 'Bearer',
     expires_in: 120,
   });
-  // Answers any POST under /api/ so the test never depends on an unspecified route string.
+
+  /**
+   * record_meal.ts sends:
+   *
+   * POST /api/meallog/me
+   *
+   * and expects:
+   *
+   * {
+   *   success: true,
+   *   data: {
+   *     id,
+   *     date,
+   *     meal_type,
+   *     food_name,
+   *     calories,
+   *     protein,
+   *     carbs,
+   *     fat,
+   *     fiber,
+   *     sugar,
+   *     sodium,
+   *     time
+   *   }
+   * }
+   *
+   * ANY_API_PATH keeps this test independent of the exact
+   * route matcher used by the upstream mock.
+   */
   upstream.route({
     path: ANY_API_PATH,
     method: 'POST',
     status: 201,
-    body: { data: { entry_id: 'meal-log-entry-1', energy_kj: 900, items: [{ name: 'porridge' }] } },
+    body: {
+      success: true,
+      data: {
+        id: '1',
+        date: SMALL_MEAL.date,
+        meal_type: SMALL_MEAL.meal_type,
+        food_name: SMALL_MEAL.food_name,
+        calories: null,
+        protein: null,
+        carbs: null,
+        fat: null,
+        fiber: null,
+        sugar: null,
+        sodium: null,
+        time: SMALL_MEAL.time,
+      },
+    },
   });
-  server = await startTestServer();
+
+  /**
+   * IMPORTANT:
+   *
+   * Use the real production registerTools() and inject the
+   * real Redis-backed confirmation store.
+   *
+   * Previously this was omitted, which caused the test server
+   * to use unavailableConfirmations and return:
+   *
+   *   "The service is temporarily unavailable."
+   */
+  server = await startTestServer({
+    registerRealTools: true,
+    confirmations: tracked(confirmationStore),
+  });
 });
 
 afterEach(async () => {
+  if (configured === undefined) {
+    return;
+  }
+
   await server.close();
   await upstream.restore();
+
+  /**
+   * Delete only keys created by this suite.
+   */
+  if (confirmationKeys.length > 0) {
+    await raw.del(confirmationKeys.splice(0));
+  }
 });
 
 afterAll(async () => {
+  if (configured !== undefined) {
+    confirmationStore.close();
+    raw.destroy();
+  }
+
   await closeLocalDispatcher();
 });
 
-describe('two-step write confirmation', () => {
+describe.skipIf(configured === undefined)('two-step write confirmation', () => {
   /**
-   * CASE 8. A confirmation used twice — no second write. All three legs: propose persists
-   * nothing, confirm writes once, replay writes no second time.
+   * CASE 8
+   *
+   * A confirmation used twice must never produce a second
+   * backend write.
+   *
+   * Three legs:
+   *
+   *   1. proposal -> zero backend writes
+   *   2. confirmation -> exactly one backend write
+   *   3. replay -> still exactly one backend write
    */
   it('writes once across a replayed confirmation token', async () => {
-    // Leg 1: propose.
+    /**
+     * LEG 1: Proposal.
+     *
+     * No confirmation token is supplied.
+     * record_meal must create a confirmation proposal and
+     * must NOT write to the backend.
+     */
     const proposal = expectToolResult(
       await callTool(server, 'record_meal', SMALL_MEAL, token),
       'case 8 leg 1: record_meal with no confirmation token'
     );
-    expect(
-      writeCalls(),
-      'case 8 leg 1: the first call resolves and summarises, and persists nothing'
-    ).toHaveLength(0);
 
-    // Server-side summary: a model-authored one would be the model describing its own write.
+    expect(writeCalls(), 'case 8 leg 1: proposing a meal must not persist anything').toHaveLength(
+      0
+    );
+
+    /**
+     * The server-generated summary must contain the exact
+     * pending change.
+     */
     expect(
       proposal.text,
       'case 8 leg 1: the pending action must carry a human-readable summary of the exact change'
@@ -163,83 +378,149 @@ describe('two-step write confirmation', () => {
 
     const confirmation = expectConfirmationToken(proposal, 'case 8 leg 1');
 
-    // Leg 2: confirm. Exactly one write.
+    /**
+     * LEG 2: Confirm.
+     *
+     * Send exactly the same meal arguments plus the
+     * confirmation token.
+     */
     const confirmed = expectToolResult(
       await callTool(
         server,
         'record_meal',
-        { ...SMALL_MEAL, confirmation_token: confirmation },
+        {
+          ...SMALL_MEAL,
+          confirmation_token: confirmation,
+        },
         token
       ),
       'case 8 leg 2: record_meal with a matching confirmation token'
     );
+
     expect(
       writeCalls(),
-      'case 8 leg 2: a confirmed write reaches the backend exactly once'
+      'case 8 leg 2: a confirmed write must reach the backend exactly once'
     ).toHaveLength(1);
+
     expect(confirmed.isError, 'case 8 leg 2: a matching confirmation is not an error').toBe(false);
 
-    // Leg 3: replay the same token with the same arguments. Still one write.
+    /**
+     * LEG 3: Replay the same token with the same arguments.
+     *
+     * The Redis confirmation store should return the stored
+     * result instead of executing another backend write.
+     */
     const replay = expectToolResult(
       await callTool(
         server,
         'record_meal',
-        { ...SMALL_MEAL, confirmation_token: confirmation },
+        {
+          ...SMALL_MEAL,
+          confirmation_token: confirmation,
+        },
         token
       ),
       'case 8 leg 3: replayed confirmation token'
     );
+
     expect(
       writeCalls(),
-      'case 8 leg 3: the confirmation token is single use and is the idempotency key. A replay must not produce a second meal-log entry'
+      'case 8 leg 3: replaying a confirmation token must not produce a second backend write'
     ).toHaveLength(1);
 
-    // Require structured results on both sides before comparing — undefined === undefined otherwise.
+    /**
+     * The production Redis store returns the original result
+     * on replay.
+     *
+     * Require both structured results before comparing them.
+     * Otherwise undefined === undefined could incorrectly pass.
+     */
     const returnedOriginalResult =
       confirmed.structured !== undefined &&
       replay.structured !== undefined &&
       JSON.stringify(replay.structured) === JSON.stringify(confirmed.structured);
 
-    // Either branch is permitted: the token is refused here (single use), or absorbed
-    // idempotently by the backing endpoint. A wire test cannot see which layer answered.
+    /**
+     * Either behaviour is acceptable according to the test
+     * contract:
+     *
+     *   - reject the replay, or
+     *   - return the original stored result.
+     *
+     * What is never acceptable is a second backend write.
+     */
     expect(
       replay.isError || returnedOriginalResult,
-      'case 8 leg 3: a replay is either refused or returns the original result. Never a protocol error or a crash, and "no structured result on either side" is not idempotency'
+      'case 8 leg 3: replay must either be refused or return the original result; it must never perform a second write'
     ).toBe(true);
   });
 
   /**
-   * CASE 9. A confirmation reused with different arguments, refused. Issued for one bowl of
-   * porridge, presented against six bowls and three slices of cake.
+   * CASE 9
+   *
+   * A confirmation token issued for one set of arguments
+   * must not authorize a different set of arguments.
+   *
+   * Token:
+   *
+   *   breakfast + porridge
+   *
+   * Attempted reuse:
+   *
+   *   dinner + porridge + chocolate cake
    */
   it('rejects a confirmation token presented against different arguments', async () => {
+    /**
+     * First create a confirmation for the SMALL_MEAL.
+     */
     const proposal = expectToolResult(
       await callTool(server, 'record_meal', SMALL_MEAL, token),
       'case 9: record_meal proposing the small meal'
     );
+
     const confirmation = expectConfirmationToken(proposal, 'case 9');
 
+    /**
+     * Now attempt to use the small-meal token with
+     * completely different arguments.
+     */
     const replayed = expectToolResult(
       await callTool(
         server,
         'record_meal',
-        { ...LARGE_MEAL, confirmation_token: confirmation },
+        {
+          ...LARGE_MEAL,
+          confirmation_token: confirmation,
+        },
         token
       ),
       'case 9: the small-meal token presented against the large meal'
     );
 
-    expect(replayed.isError, 'case 9: an argument-hash mismatch is rejected').toBe(true);
+    /**
+     * record_meal converts confirmation mismatch into a
+     * confirmation-required error/pending response.
+     */
+    expect(replayed.isError, 'case 9: an argument-hash mismatch must be rejected').toBe(true);
+
+    /**
+     * Most importantly, the large meal must NEVER reach
+     * the backend.
+     */
     expect(
       writeCalls(),
-      'case 9: nothing may be written when the confirmation does not match the resolved arguments'
+      'case 9: nothing may be written when confirmation arguments do not match'
     ).toHaveLength(0);
 
-    // And the rejection must not leak the larger payload onward in any form.
+    /**
+     * Also inspect every request sent to the NutriHelp API
+     * and ensure the unapproved "chocolate cake" payload
+     * was never transmitted.
+     */
     for (const call of upstream.wireCalls().filter((c) => c.origin === NUTRIHELP_API_ORIGIN)) {
       expect(
         call.body,
-        'case 9: the unapproved arguments must not reach the backend at all'
+        'case 9: the unapproved arguments must not reach the backend'
       ).not.toContain('chocolate cake');
     }
   });
