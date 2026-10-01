@@ -33,7 +33,7 @@ export const MEALPLAN_ME_PATH = '/api/mealplan/me';
 
 /** The deployed route whose controller falls back to a request-supplied identifier. Not a
  *  backing endpoint; registered so that reaching it at all is observable. */
-export const MEALPLAN_LEGACY_PATH = '/api/mealplan';
+export const MEALPLAN_PATH = '/api/mealplan';
 
 /** Audit ingest shares an origin with the resource endpoints and is a POST, so anything
  *  counting "writes" by method and origin counts audit envelopes too — and a `started` envelope

@@ -3,8 +3,8 @@
  * the operation and its arguments here.
  *
  * `server.ts` registers tools by calling `registerTools`; it never imports a tool module. Every
- * registered handler is wrapped so the last four steps of the mandatory order run before it — the
- * first two ran at the transport and arrive as evidence rather than as a claim.
+ * registered handler is wrapped so the last four steps of the mandatory order run before it —
+ * the first two ran at the transport and arrive as evidence rather than as a claim.
  */
 
 import type { McpServer, McpRequestContext, ToolCallback } from '@modelcontextprotocol/server';
@@ -19,6 +19,7 @@ import { NO_SCOPE, mappedScopeFor, type ScopeDecision } from '../auth/scopes.ts'
 import { McpError, type McpErrorLogPayload } from '../errors.ts';
 // 1. Import the plain descriptor package directly from the tool file
 import { descriptor as nutritionLookup } from './nutritionLookup.ts';
+import { descriptor as getMealPlan } from './getMealPlan.ts';
 
 /**
  * Whether a tool's backing endpoint needs the exchanged credential.
@@ -544,7 +545,11 @@ function shipped<InputArgs extends StandardSchemaWithJSON>(
 }
 
 /** The tools this server ships. A descriptor reaches the trust boundary by being in this list. */
-const SHIPPED_TOOLS: readonly ShippedTool[] = [shipped(nutritionLookup), shipped(recordMeal)];
+const SHIPPED_TOOLS: readonly ShippedTool[] = [
+  shipped(nutritionLookup),
+  shipped(recordMeal),
+  shipped(getMealPlan),
+];
 
 /**
  * **The startup throw.** The core is stateless, so a server — and therefore every registration —
@@ -565,6 +570,7 @@ export function registerTools(
   for (const tool of SHIPPED_TOOLS) {
     tool.register(server, ctx, config);
   }
+
   for (const tool of config.extraTools ?? []) {
     registerOne(server, ctx, config, tool, 'injected');
   }

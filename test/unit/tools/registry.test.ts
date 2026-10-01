@@ -185,7 +185,7 @@ describe('tool registration', () => {
       logOperational: h.config.logOperational,
     });
 
-    expect(registerTool).toHaveBeenCalledTimes(2);
+    expect(registerTool).toHaveBeenCalledTimes(3);
     expect(registerTool).toHaveBeenCalledWith(
       'nutrition_lookup',
       expect.objectContaining({ inputSchema }),
