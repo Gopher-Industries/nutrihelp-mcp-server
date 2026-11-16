@@ -166,6 +166,33 @@ describe('token validator', () => {
     });
   });
 
+  it.each([
+    ['sub', { sub: null }],
+    ['client_id', { clientId: null }],
+    ['grant_id', { grantId: null }],
+    ['jti', { jti: null }],
+  ] as const)('rejects a correctly signed token without %s', async (claim, omission) => {
+    await expect(validator().validate(await token(omission))).rejects.toMatchObject({
+      code: 'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      claim,
+      reason: 'missing',
+    });
+  });
+
+  it.each([
+    ['sub', { sub: null, claims: { sub: 'user' } }],
+    ['client_id', { clientId: null, claims: { client_id: 'client' } }],
+    ['grant_id', { grantId: null, claims: { grant_id: 'grant' } }],
+    ['jti', { jti: null, claims: { jti: 'token-id' } }],
+  ] as const)(
+    'refuses a contradictory %s identity omission at mint time',
+    async (claim, overrides) => {
+      await expect(token(overrides)).rejects.toThrow(
+        `makeToken: cannot omit ${claim} while also supplying it through claims`
+      );
+    }
+  );
+
   it('guards every claim the factory guards, and the table cannot quietly shrink', () => {
     expect(OMISSION_CONFLICTS.map((row) => row.claim)).toEqual(['iss', 'aud', 'type', 'exp']);
   });

@@ -140,6 +140,20 @@ afterAll(async () => {
 });
 
 describe('a disconnected grant, against a deliberately warm credential cache', () => {
+  it('rejects a substituted active grant for both list and call before credential access', async () => {
+    introspectOnce(activeFor(GRANT_B, CLIENT_ID));
+    introspectOnce(activeFor(GRANT_B, CLIENT_ID));
+
+    const listed = await listTools(server, tokenA);
+    const called = await callTool(server, CREDENTIALED_TOOL_NAME, {}, tokenA);
+
+    expect(listed.status).toBe(401);
+    expect(called.status).toBe(401);
+    expect(server.introspections).toHaveLength(2);
+    expect(server.credentialRequests).toHaveLength(0);
+    expect(exchangeCalls()).toBe(0);
+  });
+
   it('refuses the very next list AND call before any cached credential is read, while a second assistant keeps working', async () => {
     // 1. Warm the cache. A real exchange happens here and only here.
     introspectOnce(activeFor(GRANT_A, CLIENT_ID));

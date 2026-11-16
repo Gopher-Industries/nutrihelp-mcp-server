@@ -24,6 +24,7 @@ import { installUpstreamMock, type UpstreamMock } from '../support/upstreamMock.
 import {
   ALL_SCOPES,
   ALLOWED_ORIGIN,
+  GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   USER_A,
@@ -48,6 +49,7 @@ beforeAll(async () => {
     aud: MCP_RESOURCE_IDENTIFIER,
     scopes: ALL_SCOPES,
     sub: USER_A,
+    grantId: GRANT_A,
   });
 });
 

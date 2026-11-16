@@ -148,6 +148,8 @@ interface ProbeConfig {
   readonly validator: 'accepts' | 'rejects';
   /** Rejection cause for classifier-mapping cases. Fall-through is unreachable via real tokens. */
   readonly validatorRejectsWith?: Error;
+  /** Verified grant identifier; differs from introspection only in mismatch cases. */
+  readonly signedGrantId?: string;
   /** Returned by the injected resolver. `undefined` means the granted scopes suffice. */
   readonly missingScope?: string;
   /** Throw inside the resolver, to prove an unexpected fault closes the request rather than
@@ -266,7 +268,7 @@ async function startProbe(config: ProbeConfig): Promise<Probe> {
       // Validation spends budget (JWKS fetch); advance so the next stage's share is observable.
       clockMs += config.validationCostMs ?? 0;
       return config.validator === 'accepts'
-        ? Promise.resolve(VERIFIED_CLAIMS)
+        ? Promise.resolve({ ...VERIFIED_CLAIMS, grant_id: config.signedGrantId ?? GRANT_A })
         : Promise.reject(
             config.validatorRejectsWith ??
               new Error('the injected validator refuses this credential')
@@ -719,6 +721,17 @@ function pointerIn(challenge: string | undefined): string | undefined {
  * retryable (401 would refresh-loop against a down component). Assert status, not challenge alone.
  */
 describe('what an introspection outcome does to the response', () => {
+  it('refuses an active grant whose id differs from the signed token before scope or dispatch', async () => {
+    const p = await start({ validator: 'accepts', signedGrantId: 'another-grant' });
+
+    const response = await p.send({ authorization: `Bearer ${OPAQUE_CREDENTIAL}` });
+
+    expect(response.status).toBe(401);
+    expect(pointerIn(response.challenge)).toBe(RESOURCE_METADATA_URL);
+    expect(p.steps).toEqual(['validate', 'introspect']);
+    expect(p.scopeArgs).toHaveLength(0);
+  });
+
   it('maps an inactive grant to 401 with a challenge naming the metadata document', async () => {
     const p = await start({ validator: 'accepts', revocation: 'inactive' });
 

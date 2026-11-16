@@ -15,6 +15,7 @@ import {
 } from '../support/mcpClient.ts';
 import {
   MCP_AUTH_SERVER_URL,
+  GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_RESOURCE_IDENTIFIER,
   SCOPES,
@@ -82,6 +83,7 @@ beforeAll(async () => {
     aud: MCP_RESOURCE_IDENTIFIER,
     scopes: [SCOPES.nutritionRead],
     sub: USER_A,
+    grantId: GRANT_A,
   });
 });
 
