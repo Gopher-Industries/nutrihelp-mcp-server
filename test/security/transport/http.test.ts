@@ -28,6 +28,7 @@ import {
 import { expectNotAnAuthChallenge, expectUnauthorizedChallenge } from '../../support/assertions.ts';
 import {
   ALL_SCOPES,
+  GRANT_A,
   MCP_EXPECTED_ISSUER,
   MCP_JWKS_URL,
   MCP_RESOURCE_IDENTIFIER,
@@ -230,6 +231,7 @@ describe('what a rejected credential is reported as', () => {
       aud: MCP_RESOURCE_IDENTIFIER,
       scopes: ALL_SCOPES,
       sub: USER_A,
+      grantId: GRANT_A,
     });
 
     const response = await listTools(server, good);
@@ -432,6 +434,7 @@ describe('a key set that could not be consulted', () => {
         aud: MCP_RESOURCE_IDENTIFIER,
         scopes: ALL_SCOPES,
         sub: USER_A,
+        grantId: GRANT_A,
       });
 
     const first = await listTools(server, await goodToken());
@@ -554,6 +557,7 @@ describe('a scope name that tries to forge a parameter or a log entry', () => {
       aud: MCP_RESOURCE_IDENTIFIER,
       scopes: ALL_SCOPES,
       sub: USER_A,
+      grantId: GRANT_A,
     });
     const response = await listTools(server, good);
 

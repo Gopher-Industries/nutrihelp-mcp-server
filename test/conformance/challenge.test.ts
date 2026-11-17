@@ -60,6 +60,7 @@ beforeAll(async () => {
     aud: MCP_RESOURCE_IDENTIFIER,
     scopes: [SCOPES.nutritionRead],
     sub: USER_A,
+    grantId: GRANT_A,
   });
 });
 
@@ -487,11 +488,7 @@ describe('the frozen scope map on the wire', () => {
       })
     );
 
-    expectInsufficientScopeChallenge(
-      response,
-      SCOPES.meallogWrite,
-      'the live answer belongs to another connection, so there is no established grant for this one'
-    );
+    expectUnauthorizedChallenge(response, 'the signed and introspected grant ids must agree');
     expect(dispatches).toBe(0);
   });
 });

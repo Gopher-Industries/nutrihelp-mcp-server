@@ -447,6 +447,11 @@ export function createHttpApp(options: TransportOptions): Express {
       }
     }
 
+    if (grant !== undefined && grant.grantId !== claims.grant_id) {
+      report('unauthorized.grant_id_mismatch');
+      return denied({ status: 401, challenge: invalidTokenChallenge(resourceMetadataUrl) });
+    }
+
     const missingScope = auth.missingScopeFor?.(routing, claims, grant);
     if (missingScope !== undefined) {
       report(`insufficient_scope.${safeInOneLine(missingScope)}`);

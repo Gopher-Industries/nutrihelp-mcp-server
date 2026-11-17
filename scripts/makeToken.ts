@@ -51,14 +51,14 @@ export interface MakeTokenOptions {
   readonly aud: string | null;
   readonly scopes: readonly string[];
   /** NutriHelp `users.user_id`. */
-  readonly sub?: string;
+  readonly sub?: string | null;
   /** Absolute epoch seconds, a jose relative string such as `'-5m'`, or `null` to omit. Defaults to `'5m'`. */
   readonly exp?: number | string | null;
   /** Overrides the header `kid`, for the unknown-key-identifier cases. */
   readonly kid?: string;
-  readonly clientId?: string;
-  readonly grantId?: string;
-  readonly jti?: string;
+  readonly clientId?: string | null;
+  readonly grantId?: string | null;
+  readonly jti?: string | null;
   /** The `type` claim. Defaults to `mcp_access`; `null` omits it. */
   readonly type?: string | null;
   /** Raw payload claims, spread last. Must not repeat a claim named for omission via `null`. */
@@ -97,19 +97,25 @@ export async function makeToken(options: MakeTokenOptions): Promise<string> {
   assertNoOmissionConflict('aud', aud === null, claims);
   assertNoOmissionConflict('type', type === null, claims);
   assertNoOmissionConflict('exp', exp === null, claims);
+  assertNoOmissionConflict('sub', sub === null, claims);
+  assertNoOmissionConflict('client_id', clientId === null, claims);
+  assertNoOmissionConflict('grant_id', grantId === null, claims);
+  assertNoOmissionConflict('jti', jti === null, claims);
 
   // Omission branches stay in claim order so a negative token differs only by the claim left out.
   let unsigned = new SignJWT({
     scope: scopes.join(' '),
-    client_id: clientId,
-    grant_id: grantId,
+    ...(clientId === null ? {} : { client_id: clientId }),
+    ...(grantId === null ? {} : { grant_id: grantId }),
     ...(type === null ? {} : { type }),
     ...claims,
   }).setProtectedHeader({ alg: key.alg, kid });
 
   if (iss !== null) unsigned = unsigned.setIssuer(iss);
   if (aud !== null) unsigned = unsigned.setAudience(aud);
-  unsigned = unsigned.setSubject(sub).setJti(jti).setIssuedAt();
+  if (sub !== null) unsigned = unsigned.setSubject(sub);
+  if (jti !== null) unsigned = unsigned.setJti(jti);
+  unsigned = unsigned.setIssuedAt();
   if (exp !== null) unsigned = unsigned.setExpirationTime(exp);
 
   return unsigned.sign(key.privateKey);
