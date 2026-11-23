@@ -31,7 +31,10 @@ tool call, which is a statement about this server and none about the one it will
 
 ## Requirements
 
-Node 24 LTS, pinned in `engines.node` and `.node-version`. Node 22 sits at the exact floor for
+Node 24 LTS **24.22.1 or later within the 24.x line**. `.node-version` selects Node 24,
+and `scripts/check-node.mjs` enforces the range in `engines.node`.
+The minimum patch level follows the upgraded MCP Inspector's supported
+runtime range. Node 22 sits at the exact floor for
 type stripping and the MCP Inspector, so a loose `22` pin breaks both silently. Newer majors are
 outside the `engines` range.
 
@@ -43,7 +46,7 @@ on another major the type checker and the runtime disagree about what exists.
 works in one shell often is not on `PATH` in another, and `npm` resolves `node` from `PATH`:
 
 ```bash
-node --version    # want v24.x
+node --version    # want v24.22.1 or a later v24.x
 ```
 
 If it reports something else and you use `fnm`, its alias directory holds the pinned major and can
@@ -65,6 +68,28 @@ $env:PATH = "$env:USERPROFILE\AppData\Roaming\fnm\aliases\default;$env:PATH"
 
 Run that once per window, before `npm`. Calling `node` by full path is not enough on its own:
 `npm run` launches its own `node` from `PATH`, so the scripts would still see the wrong major.
+
+### Release dependency verification
+
+Install the committed dependency graph with `npm ci`, then run `npm run validate` and
+`npm run test:integration` with an isolated Redis URL in `MCP_CONFIRMATION_TEST_REDIS_URL`.
+The CI workflow supplies its own Redis service. An unset URL skips Redis integration tests;
+that skip is not evidence that the integration check passed.
+
+BE-03 updates the MCP server/client to 2.4.0, the Node adapter to 2.1.2 and Inspector to
+2.15.0, and refreshes compatible dependency versions in the lockfile. The packages use
+independent version lines for the framework adapter and Inspector. Zod and Undici retain
+their existing major versions with patched minimums. Vitest and its coverage provider both
+move from 4.1.10 to 4.1.12. No audit threshold or test assertion is relaxed.
+
+The release checks run on Linux in CI. On the inspected Windows Node 24.22.1 and 24.22.2
+builds, the raw NUL-header conformance case fails: a minimal strict HTTP server accepts a
+truncated field instead of rejecting the request. The corresponding Linux check passes.
+This is a remaining platform limitation, not a reason to skip the case or claim Windows
+conformance. Use the Linux CI result to assess this release gate. The Windows failure is
+tracked in [issue #39](https://github.com/Gopher-Industries/nutrihelp-mcp-server/issues/39).
+Passing these checks does not complete the separate tool,
+authorization, durable-audit or deployment requirements.
 
 ## Setup
 
