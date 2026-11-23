@@ -9,6 +9,8 @@ import { TOOL_SCOPES } from '../auth/scopes.ts';
 import { postCredentialedJson } from '../upstream/client.ts';
 /** Structural port: tools do not import the registry or another tool. */
 interface ToolRequest {
+  readonly observeStatus?: (status: number) => void;
+  readonly onConfirmed?: () => void;
   readonly nutrihelpApiBaseUrl: string;
   readonly remainingBudgetMs: () => number;
   readonly correlationId: string;
@@ -152,6 +154,7 @@ function checkStatus(status: number, request: ToolRequest): void {
 async function saveMeal(input: ConfirmedWrite, request: ToolRequest) {
   if (request.credential === undefined)
     throw unavailable(request, 'backend_credential_unavailable');
+  request.onConfirmed?.();
   const response = await postCredentialedJson({
     baseUrl: request.nutrihelpApiBaseUrl,
     path: '/api/meallog/me',
@@ -162,6 +165,7 @@ async function saveMeal(input: ConfirmedWrite, request: ToolRequest) {
     correlationId: request.correlationId,
     deadlineMs: Math.min(input.deadlineMs, request.remainingBudgetMs()),
   });
+  request.observeStatus?.(response.status);
   checkStatus(response.status, request);
   const parsed = backendResponse.safeParse(response.body);
   if (!parsed.success) throw unavailable(request, 'backend_response_invalid');

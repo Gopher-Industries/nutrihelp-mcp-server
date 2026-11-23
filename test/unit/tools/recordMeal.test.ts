@@ -58,7 +58,7 @@ describe('record_meal on the central dispatch path', () => {
     });
     expect(h.confirmations.execute).not.toHaveBeenCalled();
     expect(upstream.wireCalls()).toHaveLength(0);
-    expect(h.config.auditEnqueue).toHaveBeenCalledTimes(1);
+    expect(h.config.auditEnqueue).toHaveBeenCalledTimes(2);
     expect(h.credentialFor).toHaveBeenCalledTimes(1);
   });
 

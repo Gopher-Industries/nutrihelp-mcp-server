@@ -14,7 +14,7 @@ import { unavailableConfirmations } from '../../support/confirmationFixture.ts';
 import { describe, expect, it } from 'vitest';
 import type { JWTPayload } from 'jose';
 import type { McpRequestContext, McpServer } from '@modelcontextprotocol/server';
-import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from '../../../src/tools/registry.ts';
+import { registerTools } from '../../../src/tools/registry.ts';
 import {
   MEAL_LOG_WRITE_SCOPE,
   NO_SCOPE,
@@ -367,7 +367,7 @@ describe('every registered tool is in the map', () => {
       // resolves nothing is the honest fixture.
       authorizationFor: () => undefined,
       resourceMetadataUrl: RESOURCE_METADATA_URL,
-      auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+      auditEnqueue: () => Promise.resolve(),
       // Likewise: nothing is refused here, so there is nothing to report on either channel.
       logSecurity: () => undefined,
       logOperational: () => undefined,

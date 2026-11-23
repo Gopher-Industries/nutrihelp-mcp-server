@@ -12,7 +12,8 @@ import { createRevocationChecker } from './auth/revocation.ts';
 import { missingScopeFor } from './auth/scopes.ts';
 import { createUpstreamCredentialProvider } from './auth/upstreamToken.ts';
 import { createHttpApp } from './transport/http.ts';
-import { AUDIT_ENQUEUE_NOT_IMPLEMENTED, registerTools } from './tools/registry.ts';
+import { createAuditWriter } from './audit/logger.ts';
+import { registerTools } from './tools/registry.ts';
 
 import { connectKeyValue, type KeyValueConnection } from './upstream/client.ts';
 import { ConfirmationError } from './errors.ts';
@@ -110,6 +111,11 @@ export async function startServer() {
     },
   });
 
+  const auditWriter = createAuditWriter(
+    new URL('/api/security-events/mcp', config.nutrihelpApiBaseUrl).href,
+    config.clientId,
+    config.clientAssertionKey
+  );
   const leaseMs = config.requestDeadlineMs + 1_000;
   const confirmations = await connectConfirmationStore(config.redisUrl, {
     leaseMs,
@@ -146,10 +152,7 @@ export async function startServer() {
             console.error(JSON.stringify({ level: 'warn', channel: 'operational', ...event }));
           },
           resourceMetadataUrl,
-          // Step 5 of the mandatory order, NAMED AND EMPTY. `src/audit/logger.ts` does not exist,
-          // so every dispatch reaching a tool today has no durable audit record behind it. Stated
-          // here rather than omitted: a composition that skips the field would read as satisfied.
-          auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+          auditEnqueue: auditWriter,
         });
 
         return server;
@@ -173,14 +176,6 @@ export async function startServer() {
         console.error(JSON.stringify({ level: 'error', msg: error.message }));
       },
     });
-    // Said once at startup, loudly, because the placeholder wired as `auditEnqueue` above resolves
-    // without recording anything and nothing else in a running process would reveal that.
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        msg: 'audit enqueue is a placeholder: tool calls are dispatched WITHOUT a durable audit record. Do not deploy this build.',
-      })
-    );
     const listener = app.listen(config.port, () => {
       console.log(JSON.stringify({ level: 'info', msg: 'listening', port: config.port }));
     });

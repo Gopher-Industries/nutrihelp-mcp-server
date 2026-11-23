@@ -845,8 +845,11 @@ The backend receives the SHA-256 digest as Idempotency-Key and the exchanged cre
 Backend errors never return their body; 401/403 are upstream failures, not login challenges.
 Completed results and replays expose only the receipt id and status.
 
-The registry still has the documented non-durable audit placeholder. Do not enable live
-writes until the team has supplied durable audit and enabled the backend endpoint.
+Tool dispatch posts a signed event to `/api/security-events/mcp` on the configured backend.
+The backend needs its audit migration, matching audit endpoint audience and the MCP service's registered public key.
+The registry waits for acknowledgement of the same event ID and `started` phase before exchanging a credential or calling a business endpoint.
+After dispatch it records the outcome under the same event ID. It retries only the completion record (up to three attempts within the request deadline).
+If delivery still fails, the operational log carries the event ID, correlation ID, outcome and exchange state.
 The existing Redis CI job runs both confirmation-store and record-meal integration suites.
 
 The module at `src/consent/confirmation.ts` retains the `pending` / `in_progress` /

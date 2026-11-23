@@ -35,6 +35,7 @@ export const CLIENT_ASSERTION_LIFETIME_SECONDS = 60;
 export const CLIENT_ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
 export interface ClientAssertionRequest {
+  readonly bodySha256?: string;
   /** This server's private key. Never logged, never serialised. */
   readonly key: KeyObject;
   /** Registered client id. Required, no fallback. Not the resource id: separate registrations. */
@@ -42,9 +43,9 @@ export interface ClientAssertionRequest {
   /** Who must accept it: the endpoint being called. Introspection and exchange may differ. */
   readonly audience: string;
   /** Injected so expiry is testable without waiting. `undefined` takes the real clock. */
-  readonly now: Date | undefined;
+  readonly now?: Date | undefined;
   /** Injected so replay assertions can pin it. `undefined` mints one. */
-  readonly jti: string | undefined;
+  readonly jti?: string | undefined;
 }
 
 /** Blank is the shape an invented default arrives in, so it is refused loudly. */
@@ -88,7 +89,7 @@ export async function clientAssertion(request: ClientAssertionRequest): Promise<
 
   const issuedAt = Math.floor((request.now?.getTime() ?? Date.now()) / 1000);
 
-  return new SignJWT({})
+  return new SignJWT(request.bodySha256 === undefined ? {} : { body_sha256: request.bodySha256 })
     .setProtectedHeader({ alg: algorithm, typ: 'JWT' })
     .setIssuer(clientId)
     .setSubject(clientId)
