@@ -11,7 +11,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { installUpstreamMock } from '../../support/upstreamMock.ts';
 import type { AuthInfo, McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 import {
-  AUDIT_ENQUEUE_NOT_IMPLEMENTED,
   assertScopeDecision,
   registerTools,
   type AuditEnqueueEvent,
@@ -31,7 +30,6 @@ import {
   credentialedProbe,
   publicProbe,
   CREDENTIALED_TOOL_NAME,
-  PUBLIC_TOOL_NAME,
 } from '../../support/credentialedTool.ts';
 import {
   CLIENT_ID,
@@ -180,7 +178,7 @@ describe('tool registration', () => {
       nutrihelpApiBaseUrl: NUTRIHELP_API_BASE_URL,
       authorizationFor: h.config.authorizationFor,
       resourceMetadataUrl: RESOURCE_METADATA_URL,
-      auditEnqueue: AUDIT_ENQUEUE_NOT_IMPLEMENTED,
+      auditEnqueue: h.config.auditEnqueue,
       logSecurity: h.config.logSecurity,
       logOperational: h.config.logOperational,
     });
@@ -193,28 +191,21 @@ describe('tool registration', () => {
     );
   });
 
-  /**
-   * **THE SKIP, REPORTED.** Step 5 is called in order and the value the deployed root supplies
-   * does nothing, so a dispatch that reaches a tool has no durable audit record behind it. Asserted
-   * rather than left out: a suite that simply omitted the step would look like a suite whose six
-   * steps all passed.
-   */
-  it('calls step 5 and the deployed placeholder enqueues nothing', async () => {
+  it('links started and completion for a credentialed call', async () => {
     const h = harness();
     await dispatchable(h, CREDENTIALED_TOOL_NAME)({}, {});
-
-    expect(
-      h.auditEnqueued,
-      'the step RAN — it is not omitted from the order, and ticket 34 changes one value to make it durable'
-    ).toEqual([{ tool: CREDENTIALED_TOOL_NAME, correlationId: CORRELATION_ID, grantId: GRANT_A }]);
-    await expect(
-      AUDIT_ENQUEUE_NOT_IMPLEMENTED({
-        tool: 'anything',
-        correlationId: 'anything',
-        grantId: 'anything',
-      }),
-      'and what the composition root supplies today accepts the event and does nothing with it. There is nowhere to look for the record, which is the point: a BYPASS of the audit rule rather than a fallback, named so it cannot read as satisfied'
-    ).resolves.toBeUndefined();
+    expect(h.auditEnqueued).toHaveLength(2);
+    expect(h.auditEnqueued[0]).toMatchObject({
+      phase: 'started',
+      correlation_id: CORRELATION_ID,
+      grant_id: GRANT_A,
+    });
+    expect(h.auditEnqueued[1]).toMatchObject({
+      phase: 'completion',
+      outcome: 'success',
+      exchange: 'succeeded',
+      event_id: h.auditEnqueued[0]?.event_id,
+    });
   });
 
   /**
@@ -228,7 +219,7 @@ describe('tool registration', () => {
     const h = harness();
     let handlerRan = false;
     const probe = {
-      ...publicProbe,
+      ...credentialedProbe,
       handler: (request: ToolRequest) => () => {
         handlerRan = true;
         return publicProbe.handler(request)();
@@ -242,9 +233,10 @@ describe('tool registration', () => {
     });
 
     await expect(
-      registered.get(PUBLIC_TOOL_NAME)?.({}, {}),
+      registered.get(CREDENTIALED_TOOL_NAME)?.({}, {}),
       'a rejected enqueue reaches the caller, which is the whole reason the port returns a promise'
     ).rejects.toBeDefined();
+    expect(h.credentialRequests).toHaveLength(0);
     expect(
       handlerRan,
       'and step 6 never ran. Enqueue failure is a refusal, not a degraded mode: dispatching anyway would put a request upstream with no durable record behind it'
@@ -370,7 +362,7 @@ describe('what a refusal at dispatch reports', () => {
     ).rejects.toBeInstanceOf(McpError);
   });
 
-  it('raises the McpError even when the operational sink throws', async () => {
+  it('preserves the protocol failure even when the operational sink throws', async () => {
     const h = harness({ budgetMs: 1_000 });
     const { server, registered } = recordingServer();
     registerTools(server, h.ctx, {
@@ -384,8 +376,8 @@ describe('what a refusal at dispatch reports', () => {
 
     await expect(
       call?.({}, {}),
-      'the taxonomy class, not whatever the sink threw'
-    ).rejects.toBeInstanceOf(McpError);
+      'the protocol failure survives a throwing operational sink'
+    ).rejects.toMatchObject({ code: -32004 });
   });
 });
 
@@ -454,7 +446,7 @@ describe('what dispatch requires before a handler runs', () => {
     const call = dispatchable(h, CREDENTIALED_TOOL_NAME);
     h.advance(1_001);
 
-    await expect(call({}, {})).rejects.toMatchObject({ class: 'upstream_failure' });
+    await expect(call({}, {})).rejects.toMatchObject({ code: -32004 });
     expect(
       h.credentialRequests,
       'and it refuses BEFORE step 4: a stage with no budget left must not go out at all'
@@ -488,10 +480,11 @@ describe('step 4 is per tool and lazy', () => {
       h.operationalEvents[0],
       'and it failed inside the TOOL, at its own outbound call: that error code is minted by nutrition_lookup and by nothing before it, so the dispatch really did get past steps 1 to 5'
     ).toMatchObject({ class: 'upstream_failure', errorCode: 'nutrition_lookup_failed' });
-    expect(
-      h.auditEnqueued,
-      'and step 5 ran for it, which is the last thing before the handler'
-    ).toHaveLength(1);
+    expect(h.auditEnqueued[1]).toMatchObject({
+      phase: 'completion',
+      outcome: 'failure',
+      exchange: 'not_required',
+    });
     expect(
       h.credentialRequests,
       'nutrition_lookup skips exchange and calls with no credential. Minting one here would exchange a user-scoped credential for a call that never presents it'
@@ -566,8 +559,8 @@ describe('step 4 is per tool and lazy', () => {
 
     expect(
       seen?.remainingBudgetMs(),
-      'captured as a number it would still say 10000 here. Read late, it says what is actually left — and the clock is fully driven by this case, so the answer is exactly 6000 rather than at most it'
-    ).toBe(6_000);
+      'the handler sees elapsed time and preserves 500ms for the completion audit'
+    ).toBe(5_500);
     expect(seen?.correlationId).toBe(CORRELATION_ID);
   });
 });

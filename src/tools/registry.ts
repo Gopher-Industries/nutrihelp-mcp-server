@@ -9,6 +9,8 @@
 
 import type { McpServer, McpRequestContext, ToolCallback } from '@modelcontextprotocol/server';
 import { ProtocolError, type CallToolResult } from '@modelcontextprotocol/server';
+import { argumentHash } from '../audit/logger.ts';
+import type { AuditEvent, AuditWriter } from '../audit/logger.ts';
 import type { ConfirmationStore } from '../consent/confirmation.ts';
 import { PROTOCOL_ERROR_CODES } from '../errors.ts';
 import { descriptor as recordMeal } from './recordMeal.ts';
@@ -40,6 +42,8 @@ export interface ToolRequest {
     readonly clientId: string;
     readonly grantId: string;
   };
+  readonly observeStatus?: (status: number) => void;
+  readonly onConfirmed?: () => void;
   readonly confirmations: ConfirmationStore;
   readonly nutrihelpApiBaseUrl: string;
   /**
@@ -91,38 +95,7 @@ export interface ToolDescriptor<InputArgs extends StandardSchemaWithJSON> {
  */
 type ToolOrigin = 'shipped' | 'injected';
 
-/** What step 5 would durably enqueue. Opaque references only; never arguments or a token. */
-export interface AuditEnqueueEvent {
-  readonly tool: string;
-  readonly correlationId: string;
-  readonly grantId: string;
-}
-
-/**
- * Step 5 of the mandatory order, as a port.
- *
- * **It is a HOLE, and it is named so it cannot read as satisfied.** `src/audit/logger.ts` is in
- * the plan's module list and has never been written, and the audit rule is explicit that a path
- * skipping the durable enqueue is **a bypass, not a fallback**. The step is therefore declared,
- * called in order, and fulfilled today by `AUDIT_ENQUEUE_NOT_IMPLEMENTED` — a composition that
- * states the gap rather than omitting the step. A real audit implementation replaces it; nothing
- * else moves.
- *
- * **It returns a promise because the step has to be able to FAIL, and the call site awaits it.**
- * A durable enqueue is either a delivery to authenticated ingest or a write to the shared store,
- * and both are I/O that can refuse. A void-returning port cannot report that both paths failed, so
- * the step as declared could never close a request BEFORE upstream access — which is the whole
- * ordering guarantee this step exists to provide. The reason is that guarantee, not a lint rule.
- */
-export type AuditEnqueue = (event: AuditEnqueueEvent) => Promise<void>;
-
-/**
- * The placeholder described above, supplied by the composition root today. **It resolves
- * immediately and records nothing**, so dispatch proceeds with no audit record at all; the root
- * warns at startup while it is wired. Pinned by name in
- * `test/security/compositionRoot.test.ts`, so the day it leaves the root a gate notices.
- */
-export const AUDIT_ENQUEUE_NOT_IMPLEMENTED: AuditEnqueue = () => Promise.resolve();
+export type { AuditEvent as AuditEnqueueEvent } from '../audit/logger.ts';
 
 /**
  * What the security channel carries: the classes a refusal AT THE TRUST BOUNDARY is raised as.
@@ -207,8 +180,8 @@ export interface RegistryConfig {
   readonly confirmations: ConfirmationStore;
   readonly logConfirmationAnomaly: (event: ConfirmationAnomalyEvent) => void;
   readonly nutrihelpApiBaseUrl: string;
-  /** Step 5. **Required**: optional would let the step vanish with nothing to notice it. */
-  readonly auditEnqueue: AuditEnqueue;
+  /** Direct backend audit. A matching started acknowledgement gates all credential and business calls. */
+  readonly auditEnqueue: AuditWriter;
   /**
    * How dispatch reaches what the transport established for this request. **Required**: without it
    * every tool refuses, which is the correct direction — an omitted lookup must not read as "this
@@ -291,9 +264,19 @@ function refuse(config: RegistryConfig, error: McpError): McpError {
  * `src/auth/revocation.ts` draws between its two sinks, and the one the authorization-order rule
  * states as "two different records".
  */
-function reportOperational(config: RegistryConfig, error: McpError): McpError {
+interface AuditDeliveryDetail {
+  event_id: string;
+  phase: 'started' | 'completion';
+  outcome: 'success' | 'failure';
+  exchange: Completion['exchange'];
+}
+function reportOperational(
+  config: RegistryConfig,
+  error: McpError,
+  audit?: AuditDeliveryDetail
+): McpError {
   emit(() => {
-    config.logOperational(error.toLog() as RegistryOperationalEvent);
+    config.logOperational({ ...(error.toLog() as RegistryOperationalEvent), ...audit });
   });
   return error;
 }
@@ -456,6 +439,97 @@ export function assertScopeDecision(name: string, scope: ScopeDecision, origin: 
   }
 }
 
+type Completion = Extract<AuditEvent, { phase: 'completion' }>;
+
+function httpStatusClass(status: number): Completion['upstream_status_class'] {
+  return ([null, null, '2xx', '3xx', '4xx', '5xx'] as const)[Math.floor(status / 100)] ?? null;
+}
+
+function confirmedReceipt(content: unknown): boolean {
+  return (
+    typeof content === 'object' &&
+    content !== null &&
+    'status' in content &&
+    (content.status === 'recorded' || content.status === 'in_progress')
+  );
+}
+
+async function runAuditedTool<InputArgs extends StandardSchemaWithJSON>(
+  config: RegistryConfig,
+  authorization: RequestAuthorization,
+  tool: ToolDescriptor<InputArgs>,
+  args: unknown,
+  callContext: unknown,
+  started: AuditEvent,
+  startTime: number,
+  remaining: () => number,
+  auditError: (
+    errorCode: string,
+    phase: AuditDeliveryDetail['phase'],
+    outcome: Completion['outcome'],
+    exchange: Completion['exchange']
+  ) => McpError
+): Promise<CallToolResult> {
+  // Preserve part of the same request deadline for the final audit, even on a business timeout.
+  const reserve = Math.min(500, Math.floor(Math.max(0, remaining()) / 5));
+  const business = { ...authorization, deadlineAt: authorization.deadlineAt - reserve };
+  let outcome: Completion['outcome'] = 'failure';
+  let exchange: Completion['exchange'] =
+    tool.backing === 'public' ? 'not_required' : 'not_attempted';
+  let confirmation: Completion['confirmation'] = started.confirmation;
+  let upstreamStatus: Completion['upstream_status_class'] = null;
+  try {
+    remainingBudgetMs(config, business);
+    if (tool.backing === 'credentialed') exchange = 'failed';
+    const credential = await credentialFor(config, business, tool.backing);
+    if (credential) exchange = 'succeeded';
+    const inner = tool.handler({
+      caller: Object.freeze({
+        subject: authorization.grant.subject,
+        clientId: authorization.grant.clientId,
+        grantId: authorization.grant.grantId,
+      }),
+      confirmations: config.confirmations,
+      nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
+      remainingBudgetMs: () => remainingBudgetMs(config, business),
+      correlationId: authorization.correlationId,
+      credential,
+      observeStatus: (status: number) => {
+        upstreamStatus = httpStatusClass(status);
+      },
+      onConfirmed: () => {
+        confirmation = 'confirmed';
+      },
+    }) as (args: unknown, callContext: unknown) => unknown;
+
+    const result = await frameToolResult(config, authorization, tool.name, () =>
+      inner(args, callContext)
+    );
+    outcome = result.isError ? 'failure' : 'success';
+    if (tool.name === 'record_meal' && confirmedReceipt(result.structuredContent))
+      confirmation = 'confirmed';
+    return result;
+  } finally {
+    try {
+      await config.auditEnqueue(
+        {
+          ...started,
+          phase: 'completion',
+          timestamp: new Date().toISOString(),
+          outcome,
+          exchange,
+          confirmation,
+          upstream_status_class: upstreamStatus,
+          latency_ms: Math.max(0, Math.floor(authorization.now() - startTime)),
+        },
+        remaining
+      );
+    } catch {
+      auditError('mcp_audit_completion_undelivered_total', 'completion', outcome, exchange);
+    }
+  }
+}
+
 function registerOne<InputArgs extends StandardSchemaWithJSON>(
   server: McpServer,
   ctx: McpRequestContext,
@@ -478,38 +552,73 @@ function registerOne<InputArgs extends StandardSchemaWithJSON>(
 
     assertScope(config, authorization, tool.name, tool.scope);
 
-    const credential = await credentialFor(config, authorization, tool.backing);
-
-    // Step 5, before dispatch and after the credential, as the order requires. AWAITED, so a
-    // durable enqueue that fails closes the request before the TOOL's upstream call.
-    //
-    // Not before every upstream call, and the difference is worth stating: step 4 above is the
-    // RFC 8693 exchange, which on a cache miss has already left through the one egress door by the
-    // time this line runs. So a refused enqueue here closes a request that has already minted a
-    // 120-second credential into the in-process cache with no durable record behind it. The order
-    // is the one specified; the gap is recorded rather than worked around locally.
-    //
-    // See `AuditEnqueue`: what the deployed root supplies does nothing, and says so in its name.
-    await config.auditEnqueue({
+    let digest: string;
+    try {
+      remainingBudgetMs(config, authorization);
+      digest = argumentHash(args);
+    } catch (error) {
+      return frameToolResult(config, authorization, tool.name, () => {
+        throw error;
+      });
+    }
+    const remaining = () => Math.floor(authorization.deadlineAt - authorization.now());
+    const startTime = authorization.now();
+    const started: AuditEvent = {
+      schema_version: 1,
+      phase: 'started',
+      event_id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      correlation_id: authorization.correlationId,
+      grant_id: authorization.grant.grantId,
+      user_id: authorization.grant.subject,
+      client_id: authorization.grant.clientId,
       tool: tool.name,
-      correlationId: authorization.correlationId,
-      grantId: authorization.grant.grantId,
-    });
+      scope: tool.scope,
+      argument_hash: digest,
+      introspection: 'active',
+      confirmation: tool.name === 'record_meal' ? 'required' : 'not_required',
+    };
+    const auditError = (
+      errorCode: string,
+      phase: AuditDeliveryDetail['phase'],
+      outcome: Completion['outcome'],
+      exchange: Completion['exchange']
+    ) =>
+      reportOperational(
+        config,
+        new McpError({
+          class: 'upstream_failure',
+          statusClass: 'unavailable',
+          errorCode,
+          endpointClass: 'audit_ingest',
+          correlationId: authorization.correlationId,
+          latencyMs: Math.max(0, Math.floor(authorization.now() - startTime)),
+        }),
+        { event_id: started.event_id, phase, outcome, exchange }
+      );
+    try {
+      await config.auditEnqueue(started, remaining);
+    } catch {
+      const payload = auditError(
+        'audit_started_unacknowledged',
+        'started',
+        'failure',
+        'not_attempted'
+      ).toModel();
+      throw new ProtocolError(PROTOCOL_ERROR_CODES.upstream_failure, payload.message, payload);
+    }
 
-    const inner = tool.handler({
-      caller: Object.freeze({
-        subject: authorization.grant.subject,
-        clientId: authorization.grant.clientId,
-        grantId: authorization.grant.grantId,
-      }),
-      confirmations: config.confirmations,
-      nutrihelpApiBaseUrl: config.nutrihelpApiBaseUrl,
-      remainingBudgetMs: () => remainingBudgetMs(config, authorization),
-      correlationId: authorization.correlationId,
-      credential,
-    }) as (args: unknown, callContext: unknown) => unknown;
-
-    return frameToolResult(config, authorization, tool.name, () => inner(args, callContext));
+    return runAuditedTool(
+      config,
+      authorization,
+      tool,
+      args,
+      callContext,
+      started,
+      startTime,
+      remaining,
+      auditError
+    );
   }) as ToolCallback<InputArgs>;
 
   server.registerTool(tool.name, { ...tool.contract, inputSchema: tool.inputSchema }, dispatch);

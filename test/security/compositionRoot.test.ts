@@ -312,7 +312,7 @@ describe('the composition root', () => {
    * own app — and every one of them is a field whose ABSENCE would look like a smaller diff rather
    * than a disabled step.
    */
-  it('wires the credential minter, the dispatch seam and the named audit hole', () => {
+  it('wires the credential minter, the dispatch seam and the signed audit writer', () => {
     const source = sourceOf('src/server.ts');
     const options = transportOptionsIn(source);
 
@@ -328,10 +328,10 @@ describe('the composition root', () => {
       options,
       'the registry is given the per-app authorization lookup, which is the ONLY way dispatch can read what the request established. Omit it and every tool refuses'
     ).toMatch(/\bauthorizationFor,/);
-    expect(
-      options,
-      'step 5 is NAMED, and what it names does nothing: src/audit/logger.ts has never been written, so a dispatch reaching a tool has no durable audit record behind it. The audit rule calls that a bypass rather than a fallback, and this pin is what keeps the gap visible in a gate instead of in a comment. Ticket 34 replaces the value'
-    ).toMatch(/auditEnqueue:\s*AUDIT_ENQUEUE_NOT_IMPLEMENTED/);
+    expect(source).toContain('createAuditWriter(');
+    expect(options, 'the production registry receives the backend audit writer').toMatch(
+      /auditEnqueue:\s*auditWriter/
+    );
     expect(
       options,
       'and the registry is given a REAL security channel. A refusal at the dispatcher is thrown into the SDK, which never calls toLog() — so without this the identifiers an operator needs are constructed and discarded, and the transport cheaper denials are the only denials anybody can see. MATCHED THROUGH TO THE EMITTING CALL, not to the shape of a function: a pin that stopped at the arrow was satisfied by `logSecurity: () => undefined`, and a root wired that way was measured green through compositionRoot, test:controls and the whole unit layer. Scoped to the transport arguments: the revocation checker and the credential provider each take a field of this name above, and a whole-file match would be satisfied by either'

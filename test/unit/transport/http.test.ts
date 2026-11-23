@@ -29,11 +29,7 @@ import type {
   UpstreamCredential,
   UpstreamCredentialRequest,
 } from '../../../src/auth/upstreamToken.ts';
-import {
-  AUDIT_ENQUEUE_NOT_IMPLEMENTED,
-  registerTools,
-  type AuditEnqueueEvent,
-} from '../../../src/tools/registry.ts';
+import { registerTools, type AuditEnqueueEvent } from '../../../src/tools/registry.ts';
 import {
   credentialedProbe,
   publicProbe,
@@ -1032,9 +1028,10 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
     'introspect', // 2. live grant; no exemption for tools/list or a public endpoint
     'scope', // 3. the frozen map, reading the grant step 2 returned
     'dispatch', // — the SDK boundary
-    'credential', // 4. exchanged credential, only for a credentialed backing endpoint
-    'audit', // 5. A HOLE. Called in order; what the root supplies stores nothing
-    'handler', // 6. the tool itself
+    'started',
+    'credential',
+    'handler',
+    'completion',
   ];
 
   function registerProbe(
@@ -1049,7 +1046,7 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
         authorizationFor,
         resourceMetadataUrl: RESOURCE_METADATA_URL,
         auditEnqueue: (event: AuditEnqueueEvent): Promise<void> => {
-          steps.push('audit');
+          steps.push(event.phase);
           audit.push(event);
           return Promise.resolve();
         },
@@ -1098,9 +1095,12 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
       'exact equality: inserting, removing or REORDERING any step fails here, and a reorder is what a position-blind assertion cannot see'
     ).toEqual(MANDATORY_ORDER);
     expect(
-      audit.map((event) => [event.tool, event.grantId, typeof event.correlationId]),
+      audit.map((event) => [event.tool, event.grant_id, typeof event.correlation_id]),
       'step 5 was handed opaque references only — never an argument and never the token'
-    ).toEqual([[CREDENTIALED_TOOL_NAME, GRANT_A, 'string']]);
+    ).toEqual([
+      [CREDENTIALED_TOOL_NAME, GRANT_A, 'string'],
+      [CREDENTIALED_TOOL_NAME, GRANT_A, 'string'],
+    ]);
   });
 
   /** Step 4 is per tool. A public backing endpoint must not mint one. */
@@ -1124,25 +1124,12 @@ describe('the whole mandatory order, transport and registry in one sequence', ()
     expect(
       p.steps,
       'a public backing endpoint needs no login, so exchange is skipped and NOTHING ELSE moves. The two probes differ on exactly one field, so this comparison is about `backing` rather than about two unrelated tools'
-    ).toEqual(['validate', 'introspect', 'scope', 'dispatch', 'audit', 'handler']);
+    ).toEqual(['validate', 'introspect', 'scope', 'dispatch', 'started', 'handler', 'completion']);
     expect(p.credentialRequests, 'and no credential was minted for it').toHaveLength(0);
     expect(
       nutritionLookupDescriptor.backing,
       'and the one tool this server actually ships is declared public, so the case above describes the shipped path rather than only the fixture'
     ).toBe('public');
-  });
-
-  /**
-   * STEP 5 IS A HOLE, AND THIS IS WHERE THE SKIP IS REPORTED. It appears in the sequence above
-   * because the registry calls it; what the composition root supplies does nothing. A suite that
-   * left step 5 out of `MANDATORY_ORDER` would assert five steps while claiming six, and that is
-   * exactly the shape that reads as satisfied.
-   */
-  it('reports that step 5 durably enqueues nothing, because src/audit/logger.ts does not exist', async () => {
-    await expect(
-      AUDIT_ENQUEUE_NOT_IMPLEMENTED({ tool: 't', correlationId: 'c', grantId: 'g' }),
-      'the value the deployed root passes for step 5 accepts the event and stores it nowhere. Per the audit rule a path that skips the durable enqueue is a BYPASS, not a fallback — ticket 34 owns filling it, and this keeps the gap stated rather than assumed'
-    ).resolves.toBeUndefined();
   });
 
   /** The grant introspection returned reaches step 3 as its third argument, not via a hand-off. */

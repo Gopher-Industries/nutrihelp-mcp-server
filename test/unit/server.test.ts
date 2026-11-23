@@ -16,7 +16,6 @@ vi.mock('../../src/transport/http.ts', () => ({ createHttpApp: vi.fn() }));
 vi.mock('../../src/consent/confirmation.ts', () => ({ createConfirmationStore: vi.fn() }));
 vi.mock('../../src/tools/registry.ts', () => ({
   registerTools: vi.fn(),
-  AUDIT_ENQUEUE_NOT_IMPLEMENTED: vi.fn(),
 }));
 vi.mock('../../src/auth/tokenValidator.ts', () => ({ createTokenValidator: vi.fn() }));
 vi.mock('../../src/auth/revocation.ts', () => ({ createRevocationChecker: vi.fn() }));

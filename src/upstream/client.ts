@@ -176,6 +176,28 @@ export async function getWithoutCredential(options: UnauthenticatedGetOptions): 
       : { signal: AbortSignal.timeout(options.deadlineMs) }),
   });
 }
+/** Post an immutable audit envelope to the configured service. Never follow a redirect with a credential. */
+export async function postAuditEnvelope(
+  url: string,
+  body: string,
+  assertion: string,
+  deadlineMs: number
+): Promise<unknown> {
+  requireUsableDeadline(deadlineMs);
+  const response = await fetch(url, {
+    method: 'POST',
+    redirect: 'error',
+    body,
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + assertion },
+    signal: AbortSignal.timeout(deadlineMs),
+  });
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error('Audit intake unavailable');
+  }
+  return readBoundedJson(response, 2048);
+}
+
 export interface FormPostOptions {
   readonly url: string | URL;
   /** Server-assembled named fields. Never a caller's argument bag. */
@@ -375,7 +397,7 @@ export interface CredentialedJsonPost {
   readonly deadlineMs: number;
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response, limit = 32 * 1024): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) throw new TypeError('Upstream response is empty');
   const chunks: Uint8Array[] = [];
@@ -387,7 +409,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       const chunk: unknown = next.value;
       if (!(chunk instanceof Uint8Array)) throw new TypeError('Invalid response chunk');
       size += chunk.byteLength;
-      if (size > 32 * 1024) throw new TypeError('Upstream response exceeds its limit');
+      if (size > limit) throw new TypeError('Upstream response exceeds its limit');
       chunks.push(chunk);
     }
   } finally {

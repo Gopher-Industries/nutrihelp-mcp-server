@@ -80,6 +80,7 @@ export const contract = {
  * than documented, because a comment does not stop the next author copying a working example.
  */
 interface NutritionLookupRequest {
+  readonly observeStatus?: (status: number) => void;
   readonly nutrihelpApiBaseUrl: string;
   /** What is LEFT of the one budget, read at the moment of the call. */
   readonly remainingBudgetMs: () => number;
@@ -100,6 +101,7 @@ async function fetchNutritionData(
       deadlineMs: request.remainingBudgetMs(),
       correlationId: request.correlationId,
     });
+    request.observeStatus?.(response.status);
     if (!response.ok) throw new RetryableUpstreamError();
 
     const body = await response.json();
